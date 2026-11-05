@@ -8,13 +8,14 @@ use crate::channel::KvaserChannel;
 use crate::error::{check_status, KvaserError};
 use crate::event::ReceiveEvent;
 use crate::ffi::{
-    KvBusParamsTq, CAN_ERR_NOT_SUPPORTED, CAN_OPEN_ACCEPT_LARGE_DLC, CAN_OPEN_ACCEPT_VIRTUAL,
-    CAN_OPEN_CAN_FD,
+    KvBusParamsTq, KvClockInfo, CAN_CHANNELDATA_CLOCK_INFO, CAN_ERR_NOT_SUPPORTED, CAN_OK,
+    CAN_OPEN_ACCEPT_LARGE_DLC, CAN_OPEN_ACCEPT_VIRTUAL, CAN_OPEN_CAN_FD,
 };
 use crate::library::KvaserLibrary;
 use crate::mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
 
-/// Assumed CAN controller clock frequency.
+/// Assumed CAN controller clock frequency, when CANlib doesn't report the
+/// device's own (`canCHANNELDATA_CLOCK_INFO`).
 ///
 /// 80 MHz is standard on Kvaser U100, Leaf Pro HS v2, and most modern Kvaser
 /// adapters. Used to compute the prescaler for the `canSetBusParamsFdTq` API.
@@ -22,6 +23,13 @@ use crate::mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
 /// [`BusParamsFd`] values can verify their `(tseg1, tseg2)` choices satisfy
 /// `KVASER_CLOCK_HZ % (bitrate_hz * (1 + tseg1 + tseg2)) == 0`.
 pub const KVASER_CLOCK_HZ: u32 = 80_000_000;
+
+/// The clock classic-CAN timing is first solved against when the device's
+/// is unknown: 8 MHz divides the 16, 24, 32 and 80 MHz clocks of Kvaser's
+/// adapters, so a timing that fits it fits any of them. A Leaf Light v2,
+/// for one, times CAN bits from 16 MHz, and its Linux driver doesn't report
+/// its clock.
+const PORTABLE_CLOCK_HZ: u32 = 8_000_000;
 
 /// Default nominal sample point used when
 /// [`KvaserChannelBuilder::sample_point`] is not called.
@@ -88,11 +96,11 @@ impl TimingPhase {
     }
 }
 
-/// Solve for FD phase timing at the 80 MHz Kvaser clock.
+/// Solve for phase timing at the given controller clock.
 ///
-/// Returns `None` if `bitrate_hz` is zero, does not evenly divide 80 MHz,
-/// or if no `(prescaler, total_tq)` factoring lands inside the segment-length
-/// constraints.
+/// Returns `None` if `bitrate_hz` is zero, does not evenly divide
+/// `clock_hz`, or if no `(prescaler, total_tq)` factoring lands inside the
+/// segment-length constraints.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -102,15 +110,16 @@ fn solve_phase_timing(
     bitrate_hz: u32,
     sample_point: SamplePoint,
     phase: TimingPhase,
+    clock_hz: u32,
 ) -> Option<(u32, u32, u32)> {
     if bitrate_hz == 0 {
         return None;
     }
-    if KVASER_CLOCK_HZ % bitrate_hz != 0 {
+    if clock_hz % bitrate_hz != 0 {
         return None;
     }
     let sample_point_f = sample_point.as_fraction();
-    let divisor = KVASER_CLOCK_HZ / bitrate_hz;
+    let divisor = clock_hz / bitrate_hz;
 
     let (max_tseg1, max_tseg2, preferred_tq) = match phase {
         TimingPhase::Nominal => (NOMINAL_MAX_TSEG1, NOMINAL_MAX_TSEG2, PREFERRED_NOMINAL_TQ),
@@ -169,16 +178,23 @@ fn solve_phase_timing(
     best.map(|(t, _)| t)
 }
 
-fn solve_nominal(bitrate_hz: u32, sample_point: SamplePoint) -> Result<BusParams, KvaserError> {
-    let (tseg1, tseg2, sjw) = solve_phase_timing(bitrate_hz, sample_point, TimingPhase::Nominal)
-        .ok_or_else(|| {
-            KvaserError::UnsupportedTiming(format!(
-                "no Kvaser {} timing satisfies bitrate={} Hz, sample_point={}",
-                TimingPhase::Nominal.as_str(),
-                bitrate_hz,
-                sample_point.as_fraction(),
-            ))
-        })?;
+fn no_timing(phase: TimingPhase, bitrate_hz: u32, sample_point: SamplePoint) -> KvaserError {
+    KvaserError::UnsupportedTiming(format!(
+        "no Kvaser {} timing satisfies bitrate={} Hz, sample_point={}",
+        phase.as_str(),
+        bitrate_hz,
+        sample_point.as_fraction(),
+    ))
+}
+
+fn solve_nominal(
+    bitrate_hz: u32,
+    sample_point: SamplePoint,
+    clock_hz: u32,
+) -> Result<BusParams, KvaserError> {
+    let (tseg1, tseg2, sjw) =
+        solve_phase_timing(bitrate_hz, sample_point, TimingPhase::Nominal, clock_hz)
+            .ok_or_else(|| no_timing(TimingPhase::Nominal, bitrate_hz, sample_point))?;
     Ok(BusParams {
         tseg1,
         tseg2,
@@ -188,17 +204,69 @@ fn solve_nominal(bitrate_hz: u32, sample_point: SamplePoint) -> Result<BusParams
     })
 }
 
-fn solve_data(bitrate_hz: u32, sample_point: SamplePoint) -> Result<BusParamsFd, KvaserError> {
-    let (tseg1, tseg2, sjw) = solve_phase_timing(bitrate_hz, sample_point, TimingPhase::Data)
-        .ok_or_else(|| {
-            KvaserError::UnsupportedTiming(format!(
-                "no Kvaser {} timing satisfies bitrate={} Hz, sample_point={}",
-                TimingPhase::Data.as_str(),
-                bitrate_hz,
-                sample_point.as_fraction(),
-            ))
-        })?;
+/// Solve classic-CAN timing for the device's clock, or when it's unknown,
+/// for [`PORTABLE_CLOCK_HZ`] and failing that [`KVASER_CLOCK_HZ`].
+fn solve_classic(
+    bitrate_hz: u32,
+    sample_point: SamplePoint,
+    clock_hz: Option<u32>,
+) -> Result<BusParams, KvaserError> {
+    clock_hz.map_or_else(
+        || {
+            solve_nominal(bitrate_hz, sample_point, PORTABLE_CLOCK_HZ)
+                .or_else(|_| solve_nominal(bitrate_hz, sample_point, KVASER_CLOCK_HZ))
+        },
+        |clock_hz| solve_nominal(bitrate_hz, sample_point, clock_hz),
+    )
+}
+
+fn solve_data(
+    bitrate_hz: u32,
+    sample_point: SamplePoint,
+    clock_hz: u32,
+) -> Result<BusParamsFd, KvaserError> {
+    let (tseg1, tseg2, sjw) =
+        solve_phase_timing(bitrate_hz, sample_point, TimingPhase::Data, clock_hz)
+            .ok_or_else(|| no_timing(TimingPhase::Data, bitrate_hz, sample_point))?;
     Ok(BusParamsFd { tseg1, tseg2, sjw })
+}
+
+/// The device clock in Hz from CANlib's report, if it's a whole number of
+/// Hz that fits a `u32`.
+fn clock_from_info(info: &KvClockInfo) -> Option<u32> {
+    if info.version < 1 || info.numerator <= 0 || info.denominator <= 0 {
+        return None;
+    }
+    let scale = 10u64.checked_pow(u32::try_from(info.power_of_ten).ok()?)?;
+    let scaled = u64::try_from(info.numerator).ok()?.checked_mul(scale)?;
+    let denominator = u64::try_from(info.denominator).ok()?;
+    if scaled % denominator != 0 {
+        return None;
+    }
+    u32::try_from(scaled / denominator).ok()
+}
+
+/// Ask CANlib for a channel's clock (`canCHANNELDATA_CLOCK_INFO`). `None`
+/// when CANlib doesn't report it, as Linux CANlib doesn't for a Leaf Light
+/// v2 or a virtual channel (`canERR_NOT_IMPLEMENTED`).
+fn device_clock_hz(lib: &KvaserLibrary, channel_index: i32) -> Option<u32> {
+    let get_channel_data = lib.get_channel_data?;
+    let mut info = KvClockInfo::default();
+    // SAFETY: canGetChannelData was loaded from canlib; the buffer is a
+    // KvClockInfo of the size passed.
+    let status = unsafe {
+        get_channel_data(
+            channel_index,
+            CAN_CHANNELDATA_CLOCK_INFO,
+            std::ptr::addr_of_mut!(info).cast(),
+            std::mem::size_of::<KvClockInfo>(),
+        )
+    };
+    if status == CAN_OK {
+        clock_from_info(&info)
+    } else {
+        None
+    }
 }
 
 /// Driver for KVASER CAN adapters using the CANlib API.
@@ -242,13 +310,17 @@ impl KvaserDriver {
     ///
     /// Infallible: invalid indices (negative drivers, missing hardware)
     /// surface at `connect()` when CANlib's `canOpenChannel` is called.
+    /// Asks CANlib for the channel's clock, which the timing is computed for;
+    /// see [`classic`](KvaserChannelBuilder::classic) for when it's unknown.
     #[must_use]
     #[allow(clippy::cast_possible_wrap)] // channel index is small, fits in i32
     pub fn channel(&self, index: u32) -> KvaserChannelBuilder<Initial> {
+        let channel_index = index as i32;
         KvaserChannelBuilder {
             lib: Arc::clone(&self.lib),
-            channel_index: index as i32,
+            channel_index,
             accept_virtual: false,
+            clock_hz: device_clock_hz(&self.lib, channel_index),
             state: Initial,
             _mode: PhantomData,
         }
@@ -265,8 +337,29 @@ pub struct KvaserChannelBuilder<Mode> {
     lib: Arc<KvaserLibrary>,
     channel_index: i32,
     accept_virtual: bool,
+    /// The device's clock, if CANlib reports it.
+    clock_hz: Option<u32>,
     state: Mode,
     _mode: PhantomData<Mode>,
+}
+
+impl<Mode> KvaserChannelBuilder<Mode> {
+    /// The clock to check and compute timing against: the device's, or
+    /// [`KVASER_CLOCK_HZ`] when it's unknown.
+    fn clock_or_default(&self) -> u32 {
+        self.clock_hz.unwrap_or(KVASER_CLOCK_HZ)
+    }
+
+    fn with_state<Next>(self, state: Next) -> KvaserChannelBuilder<Next> {
+        KvaserChannelBuilder {
+            lib: self.lib,
+            channel_index: self.channel_index,
+            accept_virtual: self.accept_virtual,
+            clock_hz: self.clock_hz,
+            state,
+            _mode: PhantomData,
+        }
+    }
 }
 
 /// Allow opening virtual channels (e.g. the Kvaser Virtual CAN
@@ -283,26 +376,25 @@ impl<Mode> KvaserChannelBuilder<Mode> {
 
 impl KvaserChannelBuilder<Initial> {
     /// Configure the channel for classic CAN at the given bitrate (Hz).
-    /// Returns `Err` if the bitrate does not evenly divide the 80 MHz
-    /// CANlib clock. Sample point defaults to
-    /// [`SamplePoint::NOMINAL_DEFAULT`] (70%); override on the returned
-    /// builder.
+    /// Returns `Err` if the bitrate does not evenly divide the device's
+    /// clock, or the 80 MHz [`KVASER_CLOCK_HZ`] when CANlib doesn't report
+    /// it. Sample point defaults to [`SamplePoint::NOMINAL_DEFAULT`] (70%);
+    /// override on the returned builder.
+    ///
+    /// When the device's clock is unknown, the timing is solved for an
+    /// 8 MHz clock, which divides the 16, 24, 32 and 80 MHz clocks of
+    /// Kvaser's adapters, so it fits any of them; failing that, for 80 MHz.
     pub fn classic(self, bitrate_hz: u32) -> Result<KvaserChannelBuilder<Classic>, KvaserError> {
-        if bitrate_hz == 0 || KVASER_CLOCK_HZ % bitrate_hz != 0 {
+        if bitrate_hz == 0 || self.clock_or_default() % bitrate_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(bitrate_hz));
         }
-        Ok(KvaserChannelBuilder {
-            lib: self.lib,
-            channel_index: self.channel_index,
-            accept_virtual: self.accept_virtual,
-            state: Classic::new(bitrate_hz, DEFAULT_NOMINAL_SAMPLE_POINT),
-            _mode: PhantomData,
-        })
+        Ok(self.with_state(Classic::new(bitrate_hz, DEFAULT_NOMINAL_SAMPLE_POINT)))
     }
 
     /// Configure the channel for CAN FD with the given nominal and data
     /// bitrates (Hz). Returns `Err` if either bitrate does not evenly divide
-    /// the 80 MHz CANlib clock. Sample points default to
+    /// the device's clock, or the 80 MHz [`KVASER_CLOCK_HZ`] when CANlib
+    /// doesn't report it. Sample points default to
     /// [`SamplePoint::NOMINAL_DEFAULT`] (70%) and
     /// [`SamplePoint::DATA_DEFAULT`] (80%); override on the returned builder.
     pub fn fd(
@@ -310,24 +402,19 @@ impl KvaserChannelBuilder<Initial> {
         nominal_hz: u32,
         data_hz: u32,
     ) -> Result<KvaserChannelBuilder<Fd>, KvaserError> {
-        if nominal_hz == 0 || KVASER_CLOCK_HZ % nominal_hz != 0 {
+        let clock_hz = self.clock_or_default();
+        if nominal_hz == 0 || clock_hz % nominal_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(nominal_hz));
         }
-        if data_hz == 0 || KVASER_CLOCK_HZ % data_hz != 0 {
+        if data_hz == 0 || clock_hz % data_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(data_hz));
         }
-        Ok(KvaserChannelBuilder {
-            lib: self.lib,
-            channel_index: self.channel_index,
-            accept_virtual: self.accept_virtual,
-            state: Fd::new(
-                nominal_hz,
-                data_hz,
-                DEFAULT_NOMINAL_SAMPLE_POINT,
-                DEFAULT_DATA_SAMPLE_POINT,
-            ),
-            _mode: PhantomData,
-        })
+        Ok(self.with_state(Fd::new(
+            nominal_hz,
+            data_hz,
+            DEFAULT_NOMINAL_SAMPLE_POINT,
+            DEFAULT_DATA_SAMPLE_POINT,
+        )))
     }
 
     /// Configure the channel for classic CAN with explicit nominal timing.
@@ -336,12 +423,13 @@ impl KvaserChannelBuilder<Initial> {
     /// next call must be [`connect`](KvaserChannelBuilder::connect). The
     /// `bitrate_hz` is still required because CANlib's `canSetBusParams`
     /// takes the frequency as input and derives the prescaler from
-    /// `KVASER_CLOCK_HZ / (bitrate_hz * (1 + tseg1 + tseg2))`.
+    /// `clock / (bitrate_hz * (1 + tseg1 + tseg2))`.
     ///
     /// Returns `Err` if any of the following don't hold (each surfaces at
-    /// the call site rather than at `connect()`):
+    /// the call site rather than at `connect()`), for the device's clock,
+    /// or the 80 MHz [`KVASER_CLOCK_HZ`] when CANlib doesn't report it:
     ///
-    /// - `bitrate_hz` evenly divides the 80 MHz CANlib clock,
+    /// - `bitrate_hz` evenly divides the clock,
     /// - `tseg1` is in `[1, 256]` and `tseg2` is in `[2, 128]`,
     /// - `bitrate_hz * (1 + tseg1 + tseg2)` evenly divides the clock, and
     /// - the resulting prescaler is in `[1, 1024]`.
@@ -350,7 +438,8 @@ impl KvaserChannelBuilder<Initial> {
         bitrate_hz: u32,
         params: BusParams,
     ) -> Result<KvaserChannelBuilder<ClassicExplicit>, KvaserError> {
-        if bitrate_hz == 0 || KVASER_CLOCK_HZ % bitrate_hz != 0 {
+        let clock_hz = self.clock_or_default();
+        if bitrate_hz == 0 || clock_hz % bitrate_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(bitrate_hz));
         }
         // Eagerly validate that segment values are within the
@@ -360,14 +449,8 @@ impl KvaserChannelBuilder<Initial> {
         // raw CANlib status code.
         check_segment_bounds(params.tseg1, params.tseg2, TimingPhase::Nominal)?;
         let tq = total_tq(params.tseg1, params.tseg2)?;
-        let _ = compute_prescaler(bitrate_hz, tq)?;
-        Ok(KvaserChannelBuilder {
-            lib: self.lib,
-            channel_index: self.channel_index,
-            accept_virtual: self.accept_virtual,
-            state: ClassicExplicit::new(bitrate_hz, params),
-            _mode: PhantomData,
-        })
+        let _ = compute_prescaler(bitrate_hz, tq, clock_hz)?;
+        Ok(self.with_state(ClassicExplicit::new(bitrate_hz, params)))
     }
 
     /// Configure the channel for CAN FD with explicit nominal and data
@@ -377,9 +460,10 @@ impl KvaserChannelBuilder<Initial> {
     /// next call must be [`connect`](KvaserChannelBuilder::connect).
     ///
     /// Returns `Err` if any of the following don't hold (each surfaces at
-    /// the call site rather than at `connect()`):
+    /// the call site rather than at `connect()`), for the device's clock,
+    /// or the 80 MHz [`KVASER_CLOCK_HZ`] when CANlib doesn't report it:
     ///
-    /// - both `nominal_hz` and `data_hz` evenly divide the 80 MHz clock,
+    /// - both `nominal_hz` and `data_hz` evenly divide the clock,
     /// - nominal `tseg1` in `[1, 256]`, `tseg2` in `[2, 128]`,
     /// - data `tseg1` in `[1, 32]`, `tseg2` in `[2, 16]`,
     /// - `bitrate * (1 + tseg1 + tseg2)` evenly divides the clock for each
@@ -392,10 +476,11 @@ impl KvaserChannelBuilder<Initial> {
         params: BusParams,
         fd_params: BusParamsFd,
     ) -> Result<KvaserChannelBuilder<FdExplicit>, KvaserError> {
-        if nominal_hz == 0 || KVASER_CLOCK_HZ % nominal_hz != 0 {
+        let clock_hz = self.clock_or_default();
+        if nominal_hz == 0 || clock_hz % nominal_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(nominal_hz));
         }
-        if data_hz == 0 || KVASER_CLOCK_HZ % data_hz != 0 {
+        if data_hz == 0 || clock_hz % data_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(data_hz));
         }
         // Eagerly validate segment-length bounds and that the (bitrate,
@@ -403,16 +488,10 @@ impl KvaserChannelBuilder<Initial> {
         check_segment_bounds(params.tseg1, params.tseg2, TimingPhase::Nominal)?;
         check_segment_bounds(fd_params.tseg1, fd_params.tseg2, TimingPhase::Data)?;
         let nominal_tq = total_tq(params.tseg1, params.tseg2)?;
-        let _ = compute_prescaler(nominal_hz, nominal_tq)?;
+        let _ = compute_prescaler(nominal_hz, nominal_tq, clock_hz)?;
         let data_tq_val = total_tq(fd_params.tseg1, fd_params.tseg2)?;
-        let _ = compute_prescaler(data_hz, data_tq_val)?;
-        Ok(KvaserChannelBuilder {
-            lib: self.lib,
-            channel_index: self.channel_index,
-            accept_virtual: self.accept_virtual,
-            state: FdExplicit::new(nominal_hz, data_hz, params, fd_params),
-            _mode: PhantomData,
-        })
+        let _ = compute_prescaler(data_hz, data_tq_val, clock_hz)?;
+        Ok(self.with_state(FdExplicit::new(nominal_hz, data_hz, params, fd_params)))
     }
 }
 
@@ -427,7 +506,11 @@ impl KvaserChannelBuilder<Classic> {
 
     /// Finalize configuration and go on-bus in classic-CAN mode.
     pub fn connect(self) -> Result<KvaserChannel<Classic>, KvaserError> {
-        let params = solve_nominal(self.state.bitrate_hz(), self.state.sample_point())?;
+        let params = solve_classic(
+            self.state.bitrate_hz(),
+            self.state.sample_point(),
+            self.clock_hz,
+        )?;
         open_classic(
             &self.lib,
             self.channel_index,
@@ -471,12 +554,18 @@ impl KvaserChannelBuilder<Fd> {
 
     /// Finalize configuration and go on-bus in CAN FD mode.
     pub fn connect(self) -> Result<KvaserChannel<Fd>, KvaserError> {
-        let params = solve_nominal(self.state.nominal_hz(), self.state.sample_point())?;
-        let fd_params = solve_data(self.state.data_hz(), self.state.data_sample_point())?;
+        let clock_hz = self.clock_or_default();
+        let params = solve_nominal(self.state.nominal_hz(), self.state.sample_point(), clock_hz)?;
+        let fd_params = solve_data(
+            self.state.data_hz(),
+            self.state.data_sample_point(),
+            clock_hz,
+        )?;
         open_fd(
             &self.lib,
             self.channel_index,
             self.accept_virtual,
+            clock_hz,
             self.state.nominal_hz(),
             self.state.data_hz(),
             &params,
@@ -493,6 +582,7 @@ impl KvaserChannelBuilder<FdExplicit> {
             &self.lib,
             self.channel_index,
             self.accept_virtual,
+            self.clock_or_default(),
             self.state.nominal_hz(),
             self.state.data_hz(),
             self.state.params(),
@@ -551,11 +641,16 @@ fn open_classic(
 
 /// Open a CAN FD channel and go on-bus. Shared between the solver and
 /// explicit paths.
-#[allow(clippy::cast_lossless, clippy::cast_possible_wrap)]
+#[allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments
+)]
 fn open_fd(
     lib: &Arc<KvaserLibrary>,
     channel_index: i32,
     accept_virtual: bool,
+    clock_hz: u32,
     nominal_hz: u32,
     data_hz: u32,
     params: &BusParams,
@@ -577,8 +672,8 @@ fn open_fd(
         // timing in one call using explicit time quanta and works identically
         // on Windows and Linux.
         let use_legacy = if let Some(set_fd_tq) = lib.set_bus_params_fd_tq {
-            let nominal_tq = to_nominal_tq(nominal_hz, params)?;
-            let data_tq = to_data_tq(data_hz, fd_params)?;
+            let nominal_tq = to_nominal_tq(nominal_hz, params, clock_hz)?;
+            let data_tq = to_data_tq(data_hz, fd_params, clock_hz)?;
             // SAFETY: canSetBusParamsFdTq was loaded from canlib; handle is valid
             let status = unsafe { (set_fd_tq)(handle, nominal_tq, data_tq) };
             if status == CAN_ERR_NOT_SUPPORTED {
@@ -640,9 +735,13 @@ fn open_fd(
 /// Returns `UnsupportedTiming` if the segment values are large enough to
 /// overflow u32 addition, or if any field doesn't fit in `i32` (CANlib's
 /// FFI takes signed types).
-fn to_nominal_tq(bitrate_hz: u32, p: &BusParams) -> Result<KvBusParamsTq, KvaserError> {
+fn to_nominal_tq(
+    bitrate_hz: u32,
+    p: &BusParams,
+    clock_hz: u32,
+) -> Result<KvBusParamsTq, KvaserError> {
     let tq = total_tq(p.tseg1, p.tseg2)?;
-    let prescaler = compute_prescaler(bitrate_hz, tq)?;
+    let prescaler = compute_prescaler(bitrate_hz, tq, clock_hz)?;
     Ok(KvBusParamsTq {
         tq: u32_to_i32(tq, "tq")?,
         phase1: u32_to_i32(p.tseg1, "tseg1")?,
@@ -654,9 +753,13 @@ fn to_nominal_tq(bitrate_hz: u32, p: &BusParams) -> Result<KvBusParamsTq, Kvaser
 }
 
 /// Convert FD data-phase bus parameters + bitrate to a `KvBusParamsTq`.
-fn to_data_tq(bitrate_hz: u32, p: &BusParamsFd) -> Result<KvBusParamsTq, KvaserError> {
+fn to_data_tq(
+    bitrate_hz: u32,
+    p: &BusParamsFd,
+    clock_hz: u32,
+) -> Result<KvBusParamsTq, KvaserError> {
     let tq = total_tq(p.tseg1, p.tseg2)?;
-    let prescaler = compute_prescaler(bitrate_hz, tq)?;
+    let prescaler = compute_prescaler(bitrate_hz, tq, clock_hz)?;
     Ok(KvBusParamsTq {
         tq: u32_to_i32(tq, "tq")?,
         phase1: u32_to_i32(p.tseg1, "tseg1")?,
@@ -710,15 +813,15 @@ fn u32_to_i32(value: u32, field: &'static str) -> Result<i32, KvaserError> {
 }
 
 /// Derive the prescaler from the clock, bitrate, and total time quanta.
-fn compute_prescaler(bitrate_hz: u32, tq: u32) -> Result<i32, KvaserError> {
+fn compute_prescaler(bitrate_hz: u32, tq: u32, clock_hz: u32) -> Result<i32, KvaserError> {
     let bit_time = u64::from(bitrate_hz) * u64::from(tq);
-    if bit_time == 0 || u64::from(KVASER_CLOCK_HZ) % bit_time != 0 {
+    if bit_time == 0 || u64::from(clock_hz) % bit_time != 0 {
         return Err(KvaserError::UnsupportedTiming(format!(
-            "cannot achieve {bitrate_hz} Hz with {tq} TQ at {KVASER_CLOCK_HZ} Hz clock \
+            "cannot achieve {bitrate_hz} Hz with {tq} TQ at {clock_hz} Hz clock \
              (prescaler would be non-integer)"
         )));
     }
-    let prescaler = u64::from(KVASER_CLOCK_HZ) / bit_time;
+    let prescaler = u64::from(clock_hz) / bit_time;
     if prescaler == 0 || prescaler > u64::from(MAX_PRESCALER) {
         return Err(KvaserError::UnsupportedTiming(format!(
             "prescaler {prescaler} for bitrate={bitrate_hz} Hz, tq={tq} \
@@ -735,9 +838,13 @@ mod tests {
 
     #[test]
     fn solver_nominal_500k_default_sample_point() {
-        let (tseg1, tseg2, sjw) =
-            solve_phase_timing(500_000, SamplePoint::NOMINAL_DEFAULT, TimingPhase::Nominal)
-                .unwrap();
+        let (tseg1, tseg2, sjw) = solve_phase_timing(
+            500_000,
+            SamplePoint::NOMINAL_DEFAULT,
+            TimingPhase::Nominal,
+            KVASER_CLOCK_HZ,
+        )
+        .unwrap();
         assert_eq!(tseg1, 13);
         assert_eq!(tseg2, 6);
         assert_eq!(sjw, 4);
@@ -745,8 +852,13 @@ mod tests {
 
     #[test]
     fn solver_data_4m_default_sample_point() {
-        let (tseg1, tseg2, sjw) =
-            solve_phase_timing(4_000_000, SamplePoint::DATA_DEFAULT, TimingPhase::Data).unwrap();
+        let (tseg1, tseg2, sjw) = solve_phase_timing(
+            4_000_000,
+            SamplePoint::DATA_DEFAULT,
+            TimingPhase::Data,
+            KVASER_CLOCK_HZ,
+        )
+        .unwrap();
         assert_eq!(tseg1, 7);
         assert_eq!(tseg2, 2);
         assert_eq!(sjw, 2);
@@ -754,8 +866,13 @@ mod tests {
 
     #[test]
     fn solver_data_5m_uses_data_constraints() {
-        let (tseg1, tseg2, _sjw) =
-            solve_phase_timing(5_000_000, SamplePoint::DATA_DEFAULT, TimingPhase::Data).unwrap();
+        let (tseg1, tseg2, _sjw) = solve_phase_timing(
+            5_000_000,
+            SamplePoint::DATA_DEFAULT,
+            TimingPhase::Data,
+            KVASER_CLOCK_HZ,
+        )
+        .unwrap();
         assert_eq!(tseg1, 12);
         assert_eq!(tseg2, 3);
     }
@@ -765,23 +882,31 @@ mod tests {
         // A 75% data sample point at 4 Mbit/s previously resolved to a 4 TQ
         // timing with tseg2=1, which Windows CANlib rejects (canERR_PARAM).
         // The MIN_TSEG2 floor forces a portable solution instead.
-        let (tseg1, tseg2, sjw) =
-            solve_phase_timing(4_000_000, SamplePoint::PCT_75, TimingPhase::Data).unwrap();
+        let (tseg1, tseg2, sjw) = solve_phase_timing(
+            4_000_000,
+            SamplePoint::PCT_75,
+            TimingPhase::Data,
+            KVASER_CLOCK_HZ,
+        )
+        .unwrap();
         assert!(tseg2 >= MIN_TSEG2, "tseg2 must be >= 2, got {tseg2}");
         assert_eq!((tseg1, tseg2, sjw), (14, 5, 4));
     }
 
     #[test]
     fn solver_rejects_non_divisible_bitrate() {
-        assert!(
-            solve_phase_timing(333_000, SamplePoint::NOMINAL_DEFAULT, TimingPhase::Nominal)
-                .is_none()
-        );
+        assert!(solve_phase_timing(
+            333_000,
+            SamplePoint::NOMINAL_DEFAULT,
+            TimingPhase::Nominal,
+            KVASER_CLOCK_HZ
+        )
+        .is_none());
     }
 
     #[test]
     fn solve_nominal_returns_busparams() {
-        let p = solve_nominal(500_000, SamplePoint::NOMINAL_DEFAULT).unwrap();
+        let p = solve_nominal(500_000, SamplePoint::NOMINAL_DEFAULT, KVASER_CLOCK_HZ).unwrap();
         assert_eq!(p.tseg1, 13);
         assert_eq!(p.tseg2, 6);
         assert_eq!(p.sjw, 4);
@@ -791,7 +916,7 @@ mod tests {
 
     #[test]
     fn solve_data_returns_busparamsfd() {
-        let p = solve_data(4_000_000, SamplePoint::DATA_DEFAULT).unwrap();
+        let p = solve_data(4_000_000, SamplePoint::DATA_DEFAULT, KVASER_CLOCK_HZ).unwrap();
         assert_eq!(p.tseg1, 7);
         assert_eq!(p.tseg2, 2);
         assert_eq!(p.sjw, 2);
@@ -799,17 +924,20 @@ mod tests {
 
     #[test]
     fn compute_prescaler_500k_at_20tq() {
-        assert_eq!(compute_prescaler(500_000, 20).unwrap(), 8);
+        assert_eq!(compute_prescaler(500_000, 20, KVASER_CLOCK_HZ).unwrap(), 8);
     }
 
     #[test]
     fn compute_prescaler_4m_at_10tq() {
-        assert_eq!(compute_prescaler(4_000_000, 10).unwrap(), 2);
+        assert_eq!(
+            compute_prescaler(4_000_000, 10, KVASER_CLOCK_HZ).unwrap(),
+            2
+        );
     }
 
     #[test]
     fn compute_prescaler_non_integer_fails() {
-        assert!(compute_prescaler(333_000, 20).is_err());
+        assert!(compute_prescaler(333_000, 20, KVASER_CLOCK_HZ).is_err());
     }
 
     #[test]
@@ -868,7 +996,7 @@ mod tests {
     fn compute_prescaler_at_clock_boundary() {
         // bitrate=clock, tq=1 -> prescaler=1, the lower bound of the range.
         // Documents that the function is safe at the smallest valid prescaler.
-        let r = compute_prescaler(80_000_000, 1).unwrap();
+        let r = compute_prescaler(80_000_000, 1, KVASER_CLOCK_HZ).unwrap();
         assert_eq!(r, 1);
     }
 
@@ -878,6 +1006,78 @@ mod tests {
         // far above MAX_PRESCALER=1024. (Also non-integer here, so the
         // divisibility check would catch it first - try an exact case:
         // 100 Hz, tq=10 -> 80M / 1000 = 80,000 prescaler. Still above 1024.)
-        assert!(compute_prescaler(100, 10).is_err());
+        assert!(compute_prescaler(100, 10, KVASER_CLOCK_HZ).is_err());
+    }
+
+    /// The clocks of Kvaser's adapters: Leaf Light v2 (16 MHz), and the
+    /// 24, 32 and 80 MHz ones.
+    const ADAPTER_CLOCKS: [u32; 4] = [16_000_000, 24_000_000, 32_000_000, 80_000_000];
+
+    #[test]
+    fn classic_timing_without_a_clock_fits_every_adapter() {
+        for bitrate_hz in [125_000, 250_000, 500_000, 1_000_000] {
+            let p = solve_classic(bitrate_hz, SamplePoint::NOMINAL_DEFAULT, None).unwrap();
+            let tq = total_tq(p.tseg1, p.tseg2).unwrap();
+            for clock_hz in ADAPTER_CLOCKS {
+                assert!(
+                    compute_prescaler(bitrate_hz, tq, clock_hz).is_ok(),
+                    "{bitrate_hz} Hz with {tq} TQ doesn't fit a {clock_hz} Hz clock"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classic_timing_without_a_clock_at_250k() {
+        // 16 TQ, as a Leaf Light v2 takes at 250 kbit/s; 20 doesn't fit its
+        // 16 MHz clock.
+        let p = solve_classic(250_000, SamplePoint::NOMINAL_DEFAULT, None).unwrap();
+        assert_eq!(total_tq(p.tseg1, p.tseg2).unwrap(), 16);
+        assert_eq!((p.tseg1, p.tseg2, p.sjw), (10, 5, 4));
+    }
+
+    #[test]
+    fn classic_timing_without_a_clock_falls_back_to_80_mhz() {
+        // 625 kbit/s doesn't divide 8 MHz, but does 80 MHz.
+        assert!(solve_nominal(625_000, SamplePoint::NOMINAL_DEFAULT, PORTABLE_CLOCK_HZ).is_err());
+        let p = solve_classic(625_000, SamplePoint::NOMINAL_DEFAULT, None).unwrap();
+        let tq = total_tq(p.tseg1, p.tseg2).unwrap();
+        assert!(compute_prescaler(625_000, tq, KVASER_CLOCK_HZ).is_ok());
+    }
+
+    #[test]
+    fn classic_timing_with_an_80_mhz_clock_is_unchanged() {
+        let p =
+            solve_classic(500_000, SamplePoint::NOMINAL_DEFAULT, Some(KVASER_CLOCK_HZ)).unwrap();
+        assert_eq!((p.tseg1, p.tseg2, p.sjw), (13, 6, 4));
+    }
+
+    #[test]
+    fn classic_timing_for_a_16_mhz_clock() {
+        let p = solve_classic(250_000, SamplePoint::NOMINAL_DEFAULT, Some(16_000_000)).unwrap();
+        let tq = total_tq(p.tseg1, p.tseg2).unwrap();
+        assert!(compute_prescaler(250_000, tq, 16_000_000).is_ok());
+    }
+
+    #[test]
+    fn clock_from_info_scales() {
+        let info = |numerator, denominator, power_of_ten| KvClockInfo {
+            version: 1,
+            numerator,
+            denominator,
+            power_of_ten,
+            accuracy_ppm: 0,
+        };
+        assert_eq!(clock_from_info(&info(80, 1, 6)), Some(80_000_000));
+        assert_eq!(clock_from_info(&info(16_000_000, 1, 0)), Some(16_000_000));
+        assert_eq!(clock_from_info(&info(48, 2, 6)), Some(24_000_000));
+        // Not a whole number of Hz, or not reported.
+        assert_eq!(clock_from_info(&info(1, 3, 0)), None);
+        assert_eq!(clock_from_info(&info(0, 1, 6)), None);
+        assert_eq!(clock_from_info(&info(80, 0, 6)), None);
+        assert_eq!(clock_from_info(&info(80, 1, -1)), None);
+        assert_eq!(clock_from_info(&KvClockInfo::default()), None);
+        // Too big for a u32.
+        assert_eq!(clock_from_info(&info(80, 1, 9)), None);
     }
 }
