@@ -12,6 +12,7 @@ pub const CAN_ERR_NOT_SUPPORTED: i32 = -19;
 // canOpenChannel flags
 pub const CAN_OPEN_CAN_FD: i32 = 0x0400;
 pub const CAN_OPEN_ACCEPT_VIRTUAL: i32 = 0x0020;
+pub const CAN_OPEN_ACCEPT_LARGE_DLC: i32 = 0x0200;
 
 // Message flags
 pub const CAN_MSG_STD: u32 = 0x0002;
@@ -120,6 +121,31 @@ pub type FnIoCtl = unsafe extern "system" fn(
     func: u32,
     buf: *mut c_void,
     buflen: u32,
+) -> CanStatus;
+
+/// `canGetChannelData` item for the device clock: the buffer is a [`KvClockInfo`].
+pub const CAN_CHANNELDATA_CLOCK_INFO: i32 = 46;
+
+/// The device clock, as `canGetChannelData(.., canCHANNELDATA_CLOCK_INFO, ..)`
+/// reports it: `numerator / denominator * 10^power_of_ten` Hz.
+///
+/// All fields are `int` in the C API (`i32` on all platforms).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KvClockInfo {
+    pub version: i32,
+    pub numerator: i32,
+    pub denominator: i32,
+    pub power_of_ten: i32,
+    pub accuracy_ppm: i32,
+}
+
+/// `canGetChannelData(int channel, int item, void *buffer, size_t bufsize)`
+pub type FnGetChannelData = unsafe extern "system" fn(
+    channel: i32,
+    item: i32,
+    buffer: *mut c_void,
+    bufsize: usize,
 ) -> CanStatus;
 
 /// Bus parameters in time quanta for `canSetBusParamsFdTq`.

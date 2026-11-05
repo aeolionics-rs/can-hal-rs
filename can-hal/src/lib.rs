@@ -35,6 +35,7 @@ extern crate std;
 
 pub mod bus;
 pub mod channel;
+pub mod confirm;
 pub mod error;
 pub mod filter;
 pub mod frame;
@@ -45,8 +46,12 @@ pub mod timing;
 pub mod async_channel;
 
 // Re-export core types at crate root for convenience.
-pub use bus::{BusState, BusStatus, ErrorCounters};
+pub use bus::{BusState, BusStatistics, BusStatus, ErrorCounters, Recover, Statistics};
 pub use channel::{Receive, ReceiveFd, Transmit, TransmitFd};
+pub use confirm::{
+    Abort, AbortError, ConfirmedTransmit, Event, Failure, Outcome, ReceiveEvents, TransmitId,
+    TryTransmitError,
+};
 pub use error::CanError;
 pub use filter::{Filter, Filterable};
 pub use frame::{CanFdFrame, CanFrame, Frame, Timestamped};
@@ -54,7 +59,9 @@ pub use id::CanId;
 pub use timing::SamplePoint;
 
 #[cfg(feature = "async")]
-pub use async_channel::{AsyncReceive, AsyncReceiveFd, AsyncTransmit, AsyncTransmitFd};
+pub use async_channel::{
+    AsyncReceive, AsyncReceiveEvents, AsyncReceiveFd, AsyncTransmit, AsyncTransmitFd,
+};
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
@@ -186,6 +193,68 @@ mod tests {
     }
 
     #[test]
+    fn can_frame_data_is_not_remote() {
+        let id = CanId::new_standard(0x100).unwrap();
+        let frame = CanFrame::new(id, &[1, 2, 3]).unwrap();
+        assert!(!frame.is_remote_frame());
+        assert_eq!(frame.dlc(), 3);
+    }
+
+    #[test]
+    fn can_frame_remote() {
+        let id = CanId::new_extended(0x18EA_FFFE).unwrap();
+        let frame = CanFrame::new_remote(id, 8).unwrap();
+        assert!(frame.is_remote_frame());
+        assert_eq!(frame.id(), id);
+        // It asks for 8 bytes and carries none.
+        assert_eq!(frame.dlc(), 8);
+        assert_eq!(frame.len(), 0);
+        assert!(frame.is_empty());
+        assert_eq!(frame.data(), &[]);
+        // Not the same frame as a data frame with no data.
+        assert_ne!(frame, CanFrame::new(id, &[]).unwrap());
+    }
+
+    #[test]
+    fn can_frame_dlc_over_8() {
+        let id = CanId::new_standard(0x100).unwrap();
+        let data = [1, 2, 3, 4, 5, 6, 7, 8];
+        for dlc in 9..=15 {
+            let frame = CanFrame::new_with_dlc(id, &data, dlc).unwrap();
+            assert_eq!(frame.dlc(), dlc);
+            assert_eq!(frame.len(), 8);
+            assert_eq!(frame.data(), &data);
+            assert!(frame.is_data_frame());
+        }
+        // The DLC tells them apart.
+        assert_ne!(
+            CanFrame::new_with_dlc(id, &data, 12).unwrap(),
+            CanFrame::new(id, &data).unwrap()
+        );
+    }
+
+    #[test]
+    fn can_frame_dlc_must_match_data() {
+        let id = CanId::new_standard(0x100).unwrap();
+        assert_eq!(
+            CanFrame::new_with_dlc(id, &[1, 2, 3], 3),
+            CanFrame::new(id, &[1, 2, 3])
+        );
+        assert!(CanFrame::new_with_dlc(id, &[1, 2, 3], 4).is_none());
+        assert!(CanFrame::new_with_dlc(id, &[0; 7], 9).is_none());
+        assert!(CanFrame::new_with_dlc(id, &[0; 8], 16).is_none());
+    }
+
+    #[test]
+    fn can_frame_remote_dlc_over_8() {
+        let id = CanId::new_standard(0x100).unwrap();
+        let frame = CanFrame::new_remote(id, 15).unwrap();
+        assert_eq!(frame.dlc(), 15);
+        assert_eq!(frame.len(), 0);
+        assert!(CanFrame::new_remote(id, 16).is_none());
+    }
+
+    #[test]
     fn can_fd_frame_valid() {
         let id = CanId::new_extended(0x100).unwrap();
         let data = [0xAA; 32];
@@ -204,13 +273,29 @@ mod tests {
     }
 
     #[test]
+    fn can_fd_frame_dlc() {
+        let id = CanId::new_standard(0x100).unwrap();
+        let lens = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64];
+        for (dlc, len) in lens.into_iter().enumerate() {
+            let frame = CanFdFrame::new(id, &[0; 64][..len], false, false).unwrap();
+            assert_eq!(frame.dlc(), dlc, "DLC for {len} bytes");
+            assert_eq!(Frame::Fd(frame).dlc(), dlc);
+        }
+    }
+
+    #[test]
     fn frame_enum_accessors() {
         let id = CanId::new_standard(0x200).unwrap();
         let classic = CanFrame::new(id, &[0xFF]).unwrap();
         let frame = Frame::Can(classic);
         assert_eq!(frame.id(), id);
         assert_eq!(frame.len(), 1);
+        assert_eq!(frame.dlc(), 1);
         assert_eq!(frame.data(), &[0xFF]);
+        assert!(!frame.is_remote_frame());
+        assert!(Frame::Can(CanFrame::new_remote(id, 1).unwrap()).is_remote_frame());
+        let fd = CanFdFrame::new(id, &[0xFF], false, false).unwrap();
+        assert!(!Frame::Fd(fd).is_remote_frame());
     }
 
     #[test]

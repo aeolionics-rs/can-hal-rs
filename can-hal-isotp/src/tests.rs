@@ -294,6 +294,18 @@ fn test_receive_single_frame() {
 }
 
 #[test]
+fn test_receive_skips_remote_frame() {
+    // A remote frame on rx_id carries no ISO-TP frame: it is passed over, not parsed.
+    let remote = CanFrame::new_remote(rx_id(), 8).unwrap();
+    let sf = make_frame(rx_id(), &[0x03, 0xAA, 0xBB, 0xCC]);
+    let mock = MockChannel::new(vec![remote, sf]);
+    let mut ch = IsoTpChannel::new(mock, default_config());
+
+    let data = ch.receive().unwrap();
+    assert_eq!(data, vec![0xAA, 0xBB, 0xCC]);
+}
+
+#[test]
 fn test_receive_multi_frame() {
     // 20-byte message
     let payload: Vec<u8> = (0..20).collect();

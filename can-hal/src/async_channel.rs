@@ -1,5 +1,6 @@
 use core::future::Future;
 
+use crate::confirm::Event;
 use crate::error::CanError;
 use crate::frame::{CanFdFrame, CanFrame, Frame, Timestamped};
 
@@ -47,4 +48,17 @@ pub trait AsyncReceiveFd {
     fn receive_fd(
         &mut self,
     ) -> impl Future<Output = Result<Timestamped<Frame, Self::Timestamp>, Self::Error>> + Send;
+}
+
+/// Async receive of a channel's [`Event`]s: frames of type `F`, its transmissions' outcomes and
+/// its bus state, in the order they happened (see [`ReceiveEvents`](crate::ReceiveEvents)).
+pub trait AsyncReceiveEvents<F> {
+    type Error: CanError;
+    /// The timestamp type used by this backend, for both frames received and transmissions sent.
+    type Timestamp: Clone + Send;
+
+    /// Asynchronously receive the next event.
+    fn receive_event(
+        &mut self,
+    ) -> impl Future<Output = Result<Event<F, Self::Timestamp>, Self::Error>> + Send;
 }
