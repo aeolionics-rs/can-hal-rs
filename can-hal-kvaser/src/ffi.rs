@@ -12,6 +12,7 @@ pub const CAN_ERR_NOT_SUPPORTED: i32 = -19;
 // canOpenChannel flags
 pub const CAN_OPEN_CAN_FD: i32 = 0x0400;
 pub const CAN_OPEN_ACCEPT_VIRTUAL: i32 = 0x0020;
+pub const CAN_OPEN_ACCEPT_LARGE_DLC: i32 = 0x0200;
 
 // Message flags
 pub const CAN_MSG_STD: u32 = 0x0002;

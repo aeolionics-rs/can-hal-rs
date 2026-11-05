@@ -1,7 +1,6 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use socketcan::frame::CanAnyFrame;
 use socketcan::{CanFdSocket, Socket, SocketOptions};
 
 use can_hal::channel::{Receive, ReceiveFd, Transmit, TransmitFd};
@@ -62,7 +61,7 @@ impl Transmit for SocketCanChannel {
     type Error = SocketCanError;
 
     fn transmit(&mut self, frame: &CanFrame) -> Result<(), Self::Error> {
-        let sc_frame = convert::to_socketcan_data_frame(frame)?;
+        let sc_frame = convert::to_socketcan_frame(frame)?;
         self.socket.write_frame(&sc_frame)?;
         Ok(())
     }
@@ -77,11 +76,10 @@ impl Receive for SocketCanChannel {
         loop {
             let any_frame = self.socket.read_frame()?;
             let now = Instant::now();
-            if let CanAnyFrame::Normal(data_frame) = any_frame {
-                let frame = convert::from_socketcan_data_frame(&data_frame)?;
-                return Ok(Timestamped::new(frame, now));
+            if let Some(frame) = convert::from_socketcan_classic_frame(&any_frame) {
+                return Ok(Timestamped::new(frame?, now));
             }
-            // Skip FD, remote, and error frames - caller wants classic only.
+            // Skip FD and error frames - caller wants classic only.
         }
     }
 
@@ -89,12 +87,13 @@ impl Receive for SocketCanChannel {
         self.ensure_nonblocking()?;
         loop {
             match self.socket.read_frame() {
-                Ok(CanAnyFrame::Normal(data_frame)) => {
-                    let now = Instant::now();
-                    let frame = convert::from_socketcan_data_frame(&data_frame)?;
-                    return Ok(Some(Timestamped::new(frame, now)));
+                Ok(any_frame) => {
+                    if let Some(frame) = convert::from_socketcan_classic_frame(&any_frame) {
+                        let now = Instant::now();
+                        return Ok(Some(Timestamped::new(frame?, now)));
+                    }
+                    // Skip FD and error frames, drain queue.
                 }
-                Ok(_) => {} // skip FD/remote/error frames, drain queue
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
                 Err(e) => return Err(SocketCanError::Io(e)),
             }
@@ -110,14 +109,12 @@ impl Receive for SocketCanChannel {
         let deadline = Instant::now() + timeout;
         let result = loop {
             match self.socket.read_frame() {
-                Ok(CanAnyFrame::Normal(data_frame)) => {
+                Ok(any_frame) => {
                     let now = Instant::now();
-                    break convert::from_socketcan_data_frame(&data_frame)
-                        .map(|f| Some(Timestamped::new(f, now)));
-                }
-                Ok(_) => {
-                    // Skip non-classic frames. Update remaining timeout.
-                    let now = Instant::now();
+                    if let Some(frame) = convert::from_socketcan_classic_frame(&any_frame) {
+                        break frame.map(|f| Some(Timestamped::new(f, now)));
+                    }
+                    // Skip FD and error frames. Update remaining timeout.
                     if now >= deadline {
                         break Ok(None);
                     }
@@ -160,7 +157,7 @@ impl ReceiveFd for SocketCanChannel {
             if let Ok(frame) = convert::from_socketcan_any_frame(any_frame) {
                 return Ok(Timestamped::new(frame, now));
             }
-            // Skip remote/error frames.
+            // Skip error frames.
         }
     }
 
@@ -192,7 +189,7 @@ impl ReceiveFd for SocketCanChannel {
                     if let Ok(frame) = convert::from_socketcan_any_frame(any_frame) {
                         break Ok(Some(Timestamped::new(frame, now)));
                     }
-                    // Skip remote/error frames. Update remaining timeout.
+                    // Skip error frames. Update remaining timeout.
                     if now >= deadline {
                         break Ok(None);
                     }
