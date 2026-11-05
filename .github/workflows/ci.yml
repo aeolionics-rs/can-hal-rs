@@ -82,7 +82,7 @@ jobs:
     name: MSRV (1.81)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The crates declare rust-version 1.81; the other jobs use rust-toolchain.toml's toolchain,
       # so this one installs 1.81 and names it explicitly. The example crates declare no
       # rust-version and are left out.
