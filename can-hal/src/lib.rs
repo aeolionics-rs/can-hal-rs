@@ -35,6 +35,7 @@ extern crate std;
 
 pub mod bus;
 pub mod channel;
+pub mod confirm;
 pub mod error;
 pub mod filter;
 pub mod frame;
@@ -47,6 +48,9 @@ pub mod async_channel;
 // Re-export core types at crate root for convenience.
 pub use bus::{BusState, BusStatus, ErrorCounters};
 pub use channel::{Receive, ReceiveFd, Transmit, TransmitFd};
+pub use confirm::{
+    AbortError, ConfirmedTransmit, Event, Outcome, ReceiveEvents, TransmitId, TryTransmitError,
+};
 pub use error::CanError;
 pub use filter::{Filter, Filterable};
 pub use frame::{CanFdFrame, CanFrame, Frame, Timestamped};
@@ -54,7 +58,9 @@ pub use id::CanId;
 pub use timing::SamplePoint;
 
 #[cfg(feature = "async")]
-pub use async_channel::{AsyncReceive, AsyncReceiveFd, AsyncTransmit, AsyncTransmitFd};
+pub use async_channel::{
+    AsyncReceive, AsyncReceiveEvents, AsyncReceiveFd, AsyncTransmit, AsyncTransmitFd,
+};
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
