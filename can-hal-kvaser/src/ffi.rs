@@ -122,6 +122,31 @@ pub type FnIoCtl = unsafe extern "system" fn(
     buflen: u32,
 ) -> CanStatus;
 
+/// `canGetChannelData` item for the device clock: the buffer is a [`KvClockInfo`].
+pub const CAN_CHANNELDATA_CLOCK_INFO: i32 = 46;
+
+/// The device clock, as `canGetChannelData(.., canCHANNELDATA_CLOCK_INFO, ..)`
+/// reports it: `numerator / denominator * 10^power_of_ten` Hz.
+///
+/// All fields are `int` in the C API (`i32` on all platforms).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KvClockInfo {
+    pub version: i32,
+    pub numerator: i32,
+    pub denominator: i32,
+    pub power_of_ten: i32,
+    pub accuracy_ppm: i32,
+}
+
+/// `canGetChannelData(int channel, int item, void *buffer, size_t bufsize)`
+pub type FnGetChannelData = unsafe extern "system" fn(
+    channel: i32,
+    item: i32,
+    buffer: *mut c_void,
+    bufsize: usize,
+) -> CanStatus;
+
 /// Bus parameters in time quanta for `canSetBusParamsFdTq`.
 ///
 /// All fields are `int` in the C API (`i32` on all platforms).

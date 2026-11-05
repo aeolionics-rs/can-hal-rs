@@ -17,6 +17,7 @@ pub struct KvaserLibrary {
     pub(crate) set_bus_params: FnSetBusParams,
     pub(crate) set_bus_params_fd: FnSetBusParamsFd,
     pub(crate) set_bus_params_fd_tq: Option<FnSetBusParamsFdTq>,
+    pub(crate) get_channel_data: Option<FnGetChannelData>,
     pub(crate) bus_on: FnBusOn,
     pub(crate) bus_off: FnBusOff,
     pub(crate) write: FnWrite,
@@ -75,6 +76,13 @@ impl KvaserLibrary {
                 .ok()
                 .map(|sym| *sym);
 
+            // Optional: used only to ask for the device clock, which the
+            // timing solver falls back from when it's unknown.
+            let get_channel_data = lib
+                .get::<FnGetChannelData>(b"canGetChannelData\0")
+                .ok()
+                .map(|sym| *sym);
+
             let kvaser_lib = Arc::new(Self {
                 _lib: lib,
                 initialize_library,
@@ -83,6 +91,7 @@ impl KvaserLibrary {
                 set_bus_params,
                 set_bus_params_fd,
                 set_bus_params_fd_tq,
+                get_channel_data,
                 bus_on,
                 bus_off,
                 write,
