@@ -13,7 +13,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo fmt --check
 
@@ -21,7 +21,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo clippy -p can-hal-rs -p can-hal-isotp --all-targets --features async -- -D warnings
 
@@ -29,7 +29,7 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo test -p can-hal-rs -p can-hal-isotp --features async
 
@@ -37,7 +37,7 @@ jobs:
     name: Build check (hardware crates)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       # can-hal-socketcan depends on the `socketcan` crate which builds
       # against Linux headers available on ubuntu-latest.
@@ -48,7 +48,7 @@ jobs:
     name: Build check (Windows)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo clippy -p can-hal-pcan -p can-hal-kvaser --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
@@ -61,7 +61,7 @@ jobs:
       # exercising the loopback. See hardware-tests/tests/socketcan_vcan.rs.
       CAN_HAL_REQUIRE_VCAN: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Set up vcan0 interface
         run: |
