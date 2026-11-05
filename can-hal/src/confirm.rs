@@ -54,15 +54,36 @@ pub enum Outcome<T> {
     /// The frame was transmitted and acknowledged; the timestamp is when, on the same clock as
     /// the frames received.
     Sent(T),
-    /// The frame was withdrawn before its transmission started (see
-    /// [`ConfirmedTransmit::abort`]).
-    Aborted,
-    /// The controller gave up on the frame: in single-shot mode after a failed attempt, or on
-    /// going bus-off.
-    Failed,
+    /// The frame was withdrawn at the caller's request (see [`ConfirmedTransmit::abort`]); the
+    /// [`Abort`] says whether that is certain.
+    Aborted(Abort),
+    /// The frame was not confirmed sent, and won't be tried again; the [`Failure`] says why.
+    Failed(Failure),
 }
 
-/// Events reported a channel.
+/// How certain a backend is that a frame reported [`Outcome::Aborted`] was not sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Abort {
+    /// The frame was definitely withdrawn before its transmission started and was not sent.
+    Confirmed,
+    /// An abort was attempted, but the frame might have been transmitted before it took effect.
+    Unconfirmed,
+}
+
+/// Why a frame was reported [`Outcome::Failed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Failure {
+    /// The controller gave up on the frame without transmitting it: in single-shot mode after a
+    /// failed attempt, or on going bus-off.
+    GaveUp,
+    /// The report of how the frame's transmission ended was lost, for example to a full event
+    /// queue. The frame may have been transmitted.
+    Unconfirmed,
+}
+
+/// Events reported by a channel.
 #[derive(Debug, Clone)]
 pub enum Event<F, T> {
     /// A frame received from the bus.
@@ -185,15 +206,22 @@ pub trait ConfirmedTransmit<F> {
     ///   would reorder frames. Use its FIFO mode if it has one; otherwise keep one frame in the
     ///   hardware at a time, queueing any others in software.
     /// - A frame retried in software after a failure must go before any frame handed over after
-    ///   it: hold the rest back while retrying, or report it [`Outcome::Failed`] instead.
+    ///   it: hold the rest back while retrying, or report it [`Failure::GaveUp`] instead.
     /// - The report of an abort or failure that happens while earlier frames are still
     ///   outstanding is held back until they have been reported.
     fn try_transmit(&mut self, frame: &F) -> Result<TransmitId, TryTransmitError<Self::Error>>;
 
     /// Requests that transmission `id` be aborted if its transmission hasn't started. Its
-    /// [`Event::Transmitted`] says which happened: [`Outcome::Aborted`], or [`Outcome::Sent`] if
-    /// it had started. The report comes in its place in the order of handing over
-    /// (see [`try_transmit`](Self::try_transmit)), not when the abort takes effect.
+    /// [`Event::Transmitted`] says which happened:
+    ///
+    /// - [`Outcome::Aborted`] with [`Abort::Confirmed`] if the frame was withdrawn before its
+    ///   transmission started;
+    /// - [`Outcome::Aborted`] with [`Abort::Unconfirmed`] if the controller can't say whether
+    ///   the frame was transmitted first;
+    /// - [`Outcome::Sent`] if its transmission had started.
+    ///
+    /// The report comes in its place in the order of handing over (see
+    /// [`try_transmit`](Self::try_transmit)), not when the abort takes effect.
     ///
     /// `Ok` means the request was accepted, not that the frame was withdrawn: whether it was is
     /// only known from its report. An id already reported, or unknown, is ignored with `Ok`, as
@@ -297,7 +325,7 @@ mod tests {
                 self.pending.pop_front();
                 self.events.push_back(Event::Transmitted {
                     id,
-                    outcome: Outcome::Aborted,
+                    outcome: Outcome::Aborted(Abort::Confirmed),
                 });
             }
         }
@@ -446,7 +474,7 @@ mod tests {
             reports(&mut ch),
             [
                 (a, Outcome::Sent(130)),
-                (b, Outcome::Aborted),
+                (b, Outcome::Aborted(Abort::Confirmed)),
                 (c, Outcome::Sent(260))
             ]
         );
@@ -459,7 +487,7 @@ mod tests {
         let a = ch.try_transmit(&frame(0x100, &[1])).unwrap();
         let b = ch.try_transmit(&frame(0x100, &[2])).unwrap();
         ch.abort(a).unwrap();
-        assert_eq!(reports(&mut ch), [(a, Outcome::Aborted)]);
+        assert_eq!(reports(&mut ch), [(a, Outcome::Aborted(Abort::Confirmed))]);
 
         ch.send_one();
         assert_eq!(reports(&mut ch), [(b, Outcome::Sent(130))]);

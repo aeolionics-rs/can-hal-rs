@@ -49,7 +49,8 @@ pub mod async_channel;
 pub use bus::{BusState, BusStatus, ErrorCounters};
 pub use channel::{Receive, ReceiveFd, Transmit, TransmitFd};
 pub use confirm::{
-    AbortError, ConfirmedTransmit, Event, Outcome, ReceiveEvents, TransmitId, TryTransmitError,
+    Abort, AbortError, ConfirmedTransmit, Event, Failure, Outcome, ReceiveEvents, TransmitId,
+    TryTransmitError,
 };
 pub use error::CanError;
 pub use filter::{Filter, Filterable};
