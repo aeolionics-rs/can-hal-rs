@@ -45,7 +45,7 @@ pub mod timing;
 pub mod async_channel;
 
 // Re-export core types at crate root for convenience.
-pub use bus::{BusState, BusStatus, ErrorCounters};
+pub use bus::{BusState, BusStatistics, BusStatus, ErrorCounters, Recover, Statistics};
 pub use channel::{Receive, ReceiveFd, Transmit, TransmitFd};
 pub use error::CanError;
 pub use filter::{Filter, Filterable};
