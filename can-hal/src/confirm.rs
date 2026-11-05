@@ -20,8 +20,8 @@
 //! would have no [`TransmitId`] and no report, and would fall outside the order that
 //! [`ConfirmedTransmit::try_transmit`] promises; a frame taken by `receive` would be missing
 //! from the [`Event`]s. Traits that don't move frames, such as
-//! [`Filterable`](crate::Filterable) and [`BusStatus`](crate::BusStatus), may be implemented by
-//! both.
+//! [`Filterable`](crate::Filterable), [`BusStatus`](crate::BusStatus),
+//! [`Recover`](crate::Recover) and [`Statistics`](crate::Statistics), may be implemented by both.
 //!
 //! A backend therefore offers confirmation as a channel of its own, chosen in its builder: for
 //! example `driver.channel(0).classic(500_000)?.confirmed().connect()?`, giving a channel that

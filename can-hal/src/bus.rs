@@ -44,8 +44,10 @@ pub trait Recover {
     /// Starts recovery from bus-off, and returns without waiting for it to finish.
     ///
     /// Recovery finishes once the controller has seen 128 occurrences of 11 recessive bits on
-    /// the bus. To find out when that happens, poll [`BusStatus::bus_state`] until it is no
-    /// longer [`BusState::BusOff`].
+    /// the bus. To find out when that happens, either poll [`BusStatus::bus_state`] until it is
+    /// no longer [`BusState::BusOff`], or, on a channel read with
+    /// [`ReceiveEvents`](crate::ReceiveEvents), wait for an
+    /// [`Event::BusStateChanged`](crate::Event::BusStateChanged) of [`BusState::ErrorActive`].
     fn recover(&mut self) -> Result<(), Self::Error>;
 }
 
