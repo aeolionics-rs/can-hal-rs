@@ -44,32 +44,47 @@ pub fn from_pcan_id(raw_id: u32, msg_type: u8) -> Result<CanId, PcanError> {
 // Classic CAN frame conversions
 // ---------------------------------------------------------------------------
 
-/// Convert a `CanFrame` to a `TPCANMsg`.
+/// Convert a `CanFrame` to a `TPCANMsg`: a remote frame with the RTR flag,
+/// and the length it asks for.
 pub fn to_pcan_msg(frame: &CanFrame) -> TPCANMsg {
-    let (id, msg_type) = to_pcan_id(frame.id());
+    let (id, mut msg_type) = to_pcan_id(frame.id());
+    if frame.is_remote_frame() {
+        msg_type |= ffi::PCAN_MESSAGE_RTR;
+    }
     let mut data = [0u8; 8];
     data[..frame.len()].copy_from_slice(frame.data());
     TPCANMsg {
         id,
         msg_type,
-        // CAN frame length is at most 8, fits in u8.
+        // A classic frame's DLC is at most 15, fits in u8. PCAN-Basic
+        // documents LEN as 0-8; a DLC of 9-15 goes as it is, untested.
         #[allow(clippy::cast_possible_truncation)]
-        len: frame.len() as u8,
+        len: frame.dlc() as u8,
         data,
     }
 }
 
-/// Convert a `TPCANMsg` to a `CanFrame`.
-/// Returns `Ok(None)` for RTR or status messages.
+/// Convert a `TPCANMsg` to a `CanFrame`, a remote frame for an RTR message.
+/// Returns `Ok(None)` for status messages.
 pub fn from_pcan_msg(msg: &TPCANMsg) -> Result<Option<CanFrame>, PcanError> {
-    if msg.msg_type & ffi::PCAN_MESSAGE_RTR != 0 || msg.msg_type & ffi::PCAN_MESSAGE_STATUS != 0 {
+    if msg.msg_type & ffi::PCAN_MESSAGE_STATUS != 0 {
         return Ok(None);
     }
     let id = from_pcan_id(msg.id, msg.msg_type)?;
-    let len = (msg.len as usize).min(msg.data.len());
-    let frame = CanFrame::new(id, &msg.data[..len])
-        .ok_or_else(|| PcanError::InvalidFrame(format!("invalid DLC: {}", msg.len)))?;
-    Ok(Some(frame))
+    if msg.msg_type & ffi::PCAN_MESSAGE_RTR != 0 {
+        let frame = CanFrame::new_remote(id, usize::from(msg.len.min(15)))
+            .ok_or_else(|| PcanError::InvalidFrame(format!("invalid DLC: {}", msg.len)))?;
+        return Ok(Some(frame));
+    }
+    Ok(Some(classic_data_frame(id, msg.len, &msg.data)?))
+}
+
+/// A classic data frame from a DLC and the data it came with, keeping a DLC
+/// of 9-15 (8 bytes) as it is.
+fn classic_data_frame(id: CanId, dlc: u8, data: &[u8]) -> Result<CanFrame, PcanError> {
+    let dlc = usize::from(dlc.min(15));
+    CanFrame::new_with_dlc(id, &data[..dlc.min(8)], dlc)
+        .ok_or_else(|| PcanError::InvalidFrame(format!("invalid classic DLC: {dlc}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -91,9 +106,9 @@ pub fn to_pcan_msg_fd(frame: &CanFdFrame) -> TPCANMsgFD {
     TPCANMsgFD {
         id,
         msg_type,
-        // CAN FD frame length is at most 64, fits in u8.
+        // A DLC is at most 15, fits in u8.
         #[allow(clippy::cast_possible_truncation)]
-        dlc: dlc_bytes_to_code(frame.len() as u8),
+        dlc: frame.dlc() as u8,
         data,
     }
 }
@@ -114,11 +129,14 @@ pub fn from_pcan_msg_fd(msg: &TPCANMsgFD) -> Result<Option<Frame>, PcanError> {
         let frame = CanFdFrame::new(id, &msg.data[..len], brs, esi)
             .ok_or_else(|| PcanError::InvalidFrame(format!("invalid FD DLC: {}", msg.dlc)))?;
         Ok(Some(Frame::Fd(frame)))
+    } else if msg.msg_type & ffi::PCAN_MESSAGE_RTR != 0 {
+        // Classic remote frame received on an FD channel.
+        let frame = CanFrame::new_remote(id, usize::from(msg.dlc.min(15)))
+            .ok_or_else(|| PcanError::InvalidFrame(format!("invalid classic DLC: {}", msg.dlc)))?;
+        Ok(Some(Frame::Can(frame)))
     } else {
         // Classic frame received on an FD channel.
-        let len = std::cmp::min(msg.dlc, 8) as usize;
-        let frame = CanFrame::new(id, &msg.data[..len])
-            .ok_or_else(|| PcanError::InvalidFrame(format!("invalid classic DLC: {}", msg.dlc)))?;
+        let frame = classic_data_frame(id, msg.dlc, &msg.data)?;
         Ok(Some(Frame::Can(frame)))
     }
 }
@@ -126,22 +144,6 @@ pub fn from_pcan_msg_fd(msg: &TPCANMsgFD) -> Result<Option<Frame>, PcanError> {
 // ---------------------------------------------------------------------------
 // DLC encoding / decoding
 // ---------------------------------------------------------------------------
-
-/// Convert a byte count to a CAN FD DLC code (0–15).
-///
-/// Non-standard byte counts are rounded up to the next valid DLC.
-const fn dlc_bytes_to_code(bytes: u8) -> u8 {
-    match bytes {
-        0..=8 => bytes,
-        9..=12 => 9,
-        13..=16 => 10,
-        17..=20 => 11,
-        21..=24 => 12,
-        25..=32 => 13,
-        33..=48 => 14,
-        _ => 15,
-    }
-}
 
 /// Convert a CAN FD DLC code (0–15) to a byte count.
 ///
@@ -291,14 +293,64 @@ mod tests {
     }
 
     #[test]
-    fn skip_rtr_message() {
+    fn large_dlc_roundtrip() {
+        let id = CanId::new_standard(0x100).unwrap();
+        let frame = CanFrame::new_with_dlc(id, &[1, 2, 3, 4, 5, 6, 7, 8], 12).unwrap();
+        let msg = to_pcan_msg(&frame);
+        assert_eq!(msg.len, 12);
+        assert_eq!(from_pcan_msg(&msg).unwrap().unwrap(), frame);
+    }
+
+    #[test]
+    fn large_dlc_classic_frame_on_fd_channel() {
+        let msg = TPCANMsgFD {
+            id: 0x100,
+            msg_type: PCAN_MESSAGE_STANDARD,
+            dlc: 15,
+            data: [0x55; 64],
+        };
+        let Some(Frame::Can(frame)) = from_pcan_msg_fd(&msg).unwrap() else {
+            panic!("expected classic frame");
+        };
+        assert_eq!(frame.dlc(), 15);
+        assert_eq!(frame.data(), &[0x55; 8]);
+    }
+
+    #[test]
+    fn rtr_message_is_a_remote_frame() {
         let msg = TPCANMsg {
             id: 0x100,
             msg_type: ffi::PCAN_MESSAGE_RTR,
-            len: 0,
+            len: 4,
             data: [0; 8],
         };
-        assert!(from_pcan_msg(&msg).unwrap().is_none());
+        let frame = from_pcan_msg(&msg).unwrap().unwrap();
+        assert!(frame.is_remote_frame());
+        assert_eq!(frame.id(), CanId::new_standard(0x100).unwrap());
+        assert_eq!(frame.dlc(), 4);
+        assert_eq!(frame.len(), 0);
+    }
+
+    #[test]
+    fn remote_frame_roundtrip() {
+        let id = CanId::new_extended(0x18EA_FFFE).unwrap();
+        let frame = CanFrame::new_remote(id, 8).unwrap();
+        let msg = to_pcan_msg(&frame);
+        assert_ne!(msg.msg_type & ffi::PCAN_MESSAGE_RTR, 0);
+        assert_eq!(msg.len, 8);
+        assert_eq!(from_pcan_msg(&msg).unwrap(), Some(frame));
+    }
+
+    #[test]
+    fn classic_remote_frame_on_fd_channel() {
+        let msg = TPCANMsgFD {
+            id: 0x100,
+            msg_type: ffi::PCAN_MESSAGE_RTR,
+            dlc: 2,
+            data: [0; 64],
+        };
+        let frame = from_pcan_msg_fd(&msg).unwrap().unwrap();
+        assert!(frame.is_remote_frame());
     }
 
     #[test]
@@ -325,9 +377,11 @@ mod tests {
 
     #[test]
     fn dlc_encoding_roundtrip() {
+        let id = CanId::new_standard(0x100).unwrap();
         for &bytes in &[0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64] {
-            let code = dlc_bytes_to_code(bytes);
-            let back = dlc_code_to_bytes(code);
+            let frame = CanFdFrame::new(id, &[0; 64][..usize::from(bytes)], false, false).unwrap();
+            #[allow(clippy::cast_possible_truncation)] // a DLC is at most 15
+            let back = dlc_code_to_bytes(frame.dlc() as u8);
             assert_eq!(bytes, back, "DLC roundtrip failed for {bytes}");
         }
     }

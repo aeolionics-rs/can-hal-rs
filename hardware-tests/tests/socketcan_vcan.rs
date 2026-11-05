@@ -141,6 +141,69 @@ fn test_vcan_classic_loopback_extended() {
 }
 
 // ---------------------------------------------------------------------------
+// Remote frames - a classic remote frame arrives as one, asking for the same
+// length, through both the classic and the FD receive paths.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_vcan_remote_frame_loopback() {
+    let Some((mut tx, mut rx)) = open_pair() else {
+        return;
+    };
+    let remote = CanFrame::new_remote(CanId::new_extended(0x18EA_FFFE).unwrap(), 3).unwrap();
+    tx.transmit(&remote).expect("transmit remote");
+
+    let received = rx
+        .receive_timeout(Duration::from_secs(1))
+        .expect("receive error")
+        .expect("receive timeout")
+        .into_frame();
+    assert!(
+        received.is_remote_frame(),
+        "expected a remote frame, got {received:?}"
+    );
+    assert_eq!(received.dlc(), 3);
+    assert_eq!(received, remote);
+}
+
+#[test]
+fn test_vcan_large_dlc_loopback() {
+    let Some((mut tx, mut rx)) = open_pair() else {
+        return;
+    };
+    let id = CanId::new_standard(0x303).unwrap();
+    let frame = CanFrame::new_with_dlc(id, &[1, 2, 3, 4, 5, 6, 7, 8], 13).unwrap();
+    tx.transmit(&frame).expect("transmit DLC 13");
+    let remote = CanFrame::new_remote(id, 10).unwrap();
+    tx.transmit(&remote).expect("transmit remote DLC 10");
+
+    for expected in [frame, remote] {
+        let received = rx
+            .receive_timeout(Duration::from_secs(1))
+            .expect("receive error")
+            .expect("receive timeout")
+            .into_frame();
+        assert_eq!(received, expected);
+    }
+}
+
+#[test]
+fn test_vcan_receive_fd_delivers_remote_frames() {
+    let Some((mut tx, mut rx)) = open_pair() else {
+        return;
+    };
+    let remote = CanFrame::new_remote(CanId::new_standard(0x302).unwrap(), 8).unwrap();
+    tx.transmit(&remote).expect("transmit remote");
+
+    let received = rx
+        .receive_fd_timeout(Duration::from_secs(1))
+        .expect("receive_fd error")
+        .expect("receive_fd timeout")
+        .into_frame();
+    assert_eq!(received, Frame::Can(remote));
+}
+
+// ---------------------------------------------------------------------------
 // CAN FD loopback - exercises TransmitFd/ReceiveFd directly, including the
 // non-contiguous FD DLC table and the BRS flag.
 // ---------------------------------------------------------------------------
