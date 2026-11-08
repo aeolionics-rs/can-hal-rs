@@ -15,13 +15,11 @@ use crate::library::KvaserLibrary;
 use crate::mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
 
 /// The CAN controller clock assumed when CANlib doesn't report the device's
-/// own (`canCHANNELDATA_CLOCK_INFO`), as Linux CANlib doesn't for a Leaf
-/// Light v2 or a virtual channel.
+/// own (`canCHANNELDATA_CLOCK_INFO`).
 ///
-/// 80 MHz is standard on Kvaser U100, Leaf Pro HS v2, and most modern Kvaser
-/// adapters. To check explicit [`BusParams`] / [`BusParamsFd`] values against
-/// the clock a channel actually uses, call
-/// [`KvaserChannelBuilder::clock_hz`].
+/// 80 MHz is standard on most modern Kvaser adapters. To check explicit
+/// [`BusParams`] / [`BusParamsFd`] values against the clock a channel
+/// actually uses, call [`KvaserChannelBuilder::clock_hz`].
 pub const FALLBACK_CLOCK_HZ: u32 = 80_000_000;
 
 /// The former name of [`FALLBACK_CLOCK_HZ`].
@@ -30,12 +28,10 @@ pub const FALLBACK_CLOCK_HZ: u32 = 80_000_000;
 )]
 pub const KVASER_CLOCK_HZ: u32 = FALLBACK_CLOCK_HZ;
 
-/// The clock classic-CAN timing is first solved against when the device's
-/// is unknown: 8 MHz divides the 16, 24, 32 and 80 MHz clocks of Kvaser's
-/// adapters, so a timing that fits it with a prescaler of at most
-/// [`PORTABLE_MAX_PRESCALER`] fits any of them. A Leaf Light v2, for one,
-/// times CAN bits from 16 MHz, and its Linux driver doesn't report its
-/// clock.
+/// The clock classic-CAN timing is solved for first when the device's clock
+/// is unknown. 8 MHz divides the 16, 24, 32 and 80 MHz clocks of Kvaser's
+/// adapters. A timing that fits 8 MHz with a prescaler of at most
+/// [`PORTABLE_MAX_PRESCALER`] fits all of them.
 const PORTABLE_CLOCK_HZ: u32 = 8_000_000;
 
 /// The largest prescaler a [`PORTABLE_CLOCK_HZ`] timing can take. On the
@@ -276,8 +272,7 @@ fn clock_from_info(info: &KvClockInfo) -> Option<u32> {
 }
 
 /// Ask CANlib for a channel's clock (`canCHANNELDATA_CLOCK_INFO`). `None`
-/// when CANlib doesn't report it, as Linux CANlib doesn't for a Leaf Light
-/// v2 or a virtual channel (`canERR_NOT_IMPLEMENTED`).
+/// when CANlib doesn't report it.
 fn device_clock_hz(lib: &KvaserLibrary, channel_index: i32) -> Option<u32> {
     let get_channel_data = lib.get_channel_data?;
     let mut info = KvClockInfo::default();
