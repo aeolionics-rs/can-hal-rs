@@ -19,9 +19,8 @@ use crate::mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
 ///
 /// 80 MHz is standard on Kvaser U100, Leaf Pro HS v2, and most modern Kvaser
 /// adapters. Used to compute the prescaler for the `canSetBusParamsFdTq` API.
-/// Exposed so that callers constructing explicit [`BusParams`] /
-/// [`BusParamsFd`] values can verify their `(tseg1, tseg2)` choices satisfy
-/// `KVASER_CLOCK_HZ % (bitrate_hz * (1 + tseg1 + tseg2)) == 0`.
+/// To check explicit [`BusParams`] / [`BusParamsFd`] values against the clock
+/// a channel actually uses, call [`KvaserChannelBuilder::clock_hz`].
 pub const KVASER_CLOCK_HZ: u32 = 80_000_000;
 
 /// The clock classic-CAN timing is first solved against when the device's
@@ -367,9 +366,16 @@ pub struct KvaserChannelBuilder<Mode> {
 }
 
 impl<Mode> KvaserChannelBuilder<Mode> {
-    /// The clock to check and compute timing against: the device's, or
-    /// [`KVASER_CLOCK_HZ`] when it's unknown.
-    fn clock_or_default(&self) -> u32 {
+    /// The clock bitrates and explicit timing are checked against: the
+    /// device's, as CANlib reports it (`canCHANNELDATA_CLOCK_INFO`), or the
+    /// 80 MHz [`KVASER_CLOCK_HZ`] when it doesn't.
+    ///
+    /// Values passed to
+    /// [`classic_explicit`](KvaserChannelBuilder::classic_explicit) /
+    /// [`fd_explicit`](KvaserChannelBuilder::fd_explicit) must satisfy
+    /// `clock_hz() % (bitrate_hz * (1 + tseg1 + tseg2)) == 0` for each phase.
+    #[must_use]
+    pub fn clock_hz(&self) -> u32 {
         self.clock_hz.unwrap_or(KVASER_CLOCK_HZ)
     }
 
@@ -408,7 +414,7 @@ impl KvaserChannelBuilder<Initial> {
     /// 8 MHz clock, which divides the 16, 24, 32 and 80 MHz clocks of
     /// Kvaser's adapters, so it fits any of them; failing that, for 80 MHz.
     pub fn classic(self, bitrate_hz: u32) -> Result<KvaserChannelBuilder<Classic>, KvaserError> {
-        if bitrate_hz == 0 || self.clock_or_default() % bitrate_hz != 0 {
+        if bitrate_hz == 0 || self.clock_hz() % bitrate_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(bitrate_hz));
         }
         Ok(self.with_state(Classic::new(bitrate_hz, DEFAULT_NOMINAL_SAMPLE_POINT)))
@@ -425,7 +431,7 @@ impl KvaserChannelBuilder<Initial> {
         nominal_hz: u32,
         data_hz: u32,
     ) -> Result<KvaserChannelBuilder<Fd>, KvaserError> {
-        let clock_hz = self.clock_or_default();
+        let clock_hz = self.clock_hz();
         if nominal_hz == 0 || clock_hz % nominal_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(nominal_hz));
         }
@@ -461,7 +467,7 @@ impl KvaserChannelBuilder<Initial> {
         bitrate_hz: u32,
         params: BusParams,
     ) -> Result<KvaserChannelBuilder<ClassicExplicit>, KvaserError> {
-        let clock_hz = self.clock_or_default();
+        let clock_hz = self.clock_hz();
         if bitrate_hz == 0 || clock_hz % bitrate_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(bitrate_hz));
         }
@@ -499,7 +505,7 @@ impl KvaserChannelBuilder<Initial> {
         params: BusParams,
         fd_params: BusParamsFd,
     ) -> Result<KvaserChannelBuilder<FdExplicit>, KvaserError> {
-        let clock_hz = self.clock_or_default();
+        let clock_hz = self.clock_hz();
         if nominal_hz == 0 || clock_hz % nominal_hz != 0 {
             return Err(KvaserError::UnsupportedBitrate(nominal_hz));
         }
@@ -577,7 +583,7 @@ impl KvaserChannelBuilder<Fd> {
 
     /// Finalize configuration and go on-bus in CAN FD mode.
     pub fn connect(self) -> Result<KvaserChannel<Fd>, KvaserError> {
-        let clock_hz = self.clock_or_default();
+        let clock_hz = self.clock_hz();
         let params = solve_nominal(
             self.state.nominal_hz(),
             self.state.sample_point(),
@@ -610,7 +616,7 @@ impl KvaserChannelBuilder<FdExplicit> {
             &self.lib,
             self.channel_index,
             self.accept_virtual,
-            self.clock_or_default(),
+            self.clock_hz(),
             self.state.nominal_hz(),
             self.state.data_hz(),
             self.state.params(),
