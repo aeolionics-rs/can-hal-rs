@@ -151,7 +151,7 @@ where
             };
 
             let can_frame = ts_frame.into_frame();
-            if can_frame.id() != self.config.rx_id {
+            if can_frame.id() != self.config.rx_id || can_frame.is_remote_frame() {
                 continue;
             }
             if !self.check_ta(can_frame.data()) {
@@ -192,7 +192,7 @@ where
                         };
 
                         let cf = ts.into_frame();
-                        if cf.id() != self.config.rx_id {
+                        if cf.id() != self.config.rx_id || cf.is_remote_frame() {
                             continue;
                         }
                         if !self.check_ta(cf.data()) {
@@ -264,7 +264,7 @@ where
             };
 
             let can_frame = ts_frame.into_frame();
-            if can_frame.id() != self.config.rx_id {
+            if can_frame.id() != self.config.rx_id || can_frame.is_remote_frame() {
                 continue;
             }
             if !self.check_ta(can_frame.data()) {

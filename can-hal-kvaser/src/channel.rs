@@ -21,7 +21,7 @@ use crate::error::{check_status, KvaserError};
 use crate::event::ReceiveEvent;
 use crate::ffi::{
     CAN_ERR_NOMSG, CAN_FILTER_SET_CODE_EXT, CAN_FILTER_SET_CODE_STD, CAN_FILTER_SET_MASK_EXT,
-    CAN_FILTER_SET_MASK_STD, CAN_MSG_BRS, CAN_MSG_ESI, CAN_MSG_FDF, CAN_STAT_BUS_OFF,
+    CAN_FILTER_SET_MASK_STD, CAN_MSG_BRS, CAN_MSG_ESI, CAN_MSG_FDF, CAN_MSG_RTR, CAN_STAT_BUS_OFF,
     CAN_STAT_ERROR_PASSIVE, CAN_STAT_ERROR_WARNING,
 };
 use crate::library::KvaserLibrary;
@@ -107,14 +107,19 @@ impl Transmit for KvaserChannel<Classic> {
         clippy::cast_lossless
     )]
     fn transmit(&mut self, frame: &CanFrame) -> Result<(), KvaserError> {
-        let (id, flags) = to_canlib_id(frame.id());
+        let (id, mut flags) = to_canlib_id(frame.id());
+        if frame.is_remote_frame() {
+            flags |= CAN_MSG_RTR;
+        }
         // SAFETY: canWrite was loaded from canlib; handle is valid; data pointer is valid
+        // (for a remote frame, it points at no data, and its dlc is the length asked for;
+        // a dlc of 9-15 stands for the 8 bytes it points at)
         check_status(unsafe {
             (self.lib.write)(
                 self.handle,
                 id as c_long,
                 frame.data().as_ptr().cast(),
-                frame.len() as u32,
+                frame.dlc() as u32,
                 flags,
             )
         })?;

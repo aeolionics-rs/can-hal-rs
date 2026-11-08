@@ -13,6 +13,10 @@ workspace = true
 # pulls in the SocketCAN backend nor needs a vcan interface (and the sudo to
 # create one). CI turns it on with `--features vcan` on the Linux runner.
 vcan = ["dep:can-hal-socketcan"]
+# Compiles and runs the Kvaser CANlib virtual-channel tests
+# (tests/kvaser_virtual.rs). Off by default: they need CANlib and its virtual
+# driver installed.
+kvaser-virtual = []
 
 [dependencies]
 can-hal = { workspace = true }

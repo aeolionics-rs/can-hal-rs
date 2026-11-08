@@ -34,10 +34,11 @@ pub fn from_canlib_id(raw_id: u32, flags: u32) -> Result<CanId, KvaserError> {
     }
 }
 
-/// Convert a raw CANlib receive buffer into a `Frame`.
+/// Convert a raw CANlib receive buffer into a `Frame`: a classic remote frame
+/// for an RTR one.
 ///
-/// Returns `Ok(None)` for RTR frames and error frames, which are not represented
-/// in the can-hal frame model.
+/// Returns `Ok(None)` for error frames, which are not represented in the
+/// can-hal frame model.
 pub fn from_canlib_frame(
     raw_id: u32,
     data: &[u8; 64],
@@ -45,13 +46,18 @@ pub fn from_canlib_frame(
     flags: u32,
 ) -> Result<Option<Frame>, KvaserError> {
     // Skip frames we don't represent.
-    if flags & CAN_MSG_RTR != 0 || flags & CAN_MSG_ERROR_FRAME != 0 {
+    if flags & CAN_MSG_ERROR_FRAME != 0 {
         return Ok(None);
     }
 
     let id = from_canlib_id(raw_id, flags)?;
 
-    if flags & CAN_MSG_FDF != 0 {
+    if flags & CAN_MSG_RTR != 0 {
+        // A remote frame, which only a classic frame can be: dlc is the length it asks for.
+        let frame = CanFrame::new_remote(id, (dlc as usize).min(15))
+            .ok_or_else(|| KvaserError::InvalidFrame(format!("invalid remote DLC: {dlc}")))?;
+        Ok(Some(Frame::Can(frame)))
+    } else if flags & CAN_MSG_FDF != 0 {
         // CAN FD frame - dlc is already the byte count from CANlib.
         // Clamp to 64 to prevent panics on out-of-range values from FFI.
         let len = (dlc as usize).min(64);
@@ -61,9 +67,11 @@ pub fn from_canlib_frame(
             .ok_or_else(|| KvaserError::InvalidFrame(format!("invalid FD DLC: {dlc}")))?;
         Ok(Some(Frame::Fd(frame)))
     } else {
-        // Classic CAN frame.
-        let len = (dlc as usize).min(8);
-        let frame = CanFrame::new(id, &data[..len])
+        // Classic CAN frame: a channel opened with canOPEN_ACCEPT_LARGE_DLC
+        // reports a DLC of 9-15 as it is, with 8 bytes of data.
+        let dlc = (dlc as usize).min(15);
+        let len = dlc.min(8);
+        let frame = CanFrame::new_with_dlc(id, &data[..len], dlc)
             .ok_or_else(|| KvaserError::InvalidFrame(format!("invalid classic CAN DLC: {dlc}")))?;
         Ok(Some(Frame::Can(frame)))
     }
@@ -130,11 +138,37 @@ mod tests {
     }
 
     #[test]
-    fn rtr_frame_returns_none() {
+    fn rtr_frame_is_a_remote_frame() {
         // CAN_MSG_RTR = 0x0001; combined with CAN_MSG_STD = 0x0002.
         let data = [0u8; 64];
+        let Some(Frame::Can(frame)) =
+            from_canlib_frame(0x100, &data, 4, CAN_MSG_STD | CAN_MSG_RTR).unwrap()
+        else {
+            panic!("an RTR frame wasn't a classic frame");
+        };
+        assert!(frame.is_remote_frame());
+        assert_eq!(frame.id(), CanId::new_standard(0x100).unwrap());
+        assert_eq!(frame.dlc(), 4);
+        assert_eq!(frame.len(), 0);
+    }
+
+    #[test]
+    fn large_dlc_is_kept() {
+        let mut data = [0u8; 64];
+        data[..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let Some(Frame::Can(frame)) = from_canlib_frame(0x100, &data, 12, CAN_MSG_STD).unwrap()
+        else {
+            panic!("a DLC 12 frame wasn't a classic frame");
+        };
+        assert_eq!(frame.dlc(), 12);
+        assert_eq!(frame.data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn error_frame_returns_none() {
+        let data = [0u8; 64];
         assert!(
-            from_canlib_frame(0x100, &data, 0, CAN_MSG_STD | CAN_MSG_RTR)
+            from_canlib_frame(0x100, &data, 0, CAN_MSG_STD | CAN_MSG_ERROR_FRAME)
                 .unwrap()
                 .is_none()
         );

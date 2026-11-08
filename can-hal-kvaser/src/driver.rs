@@ -7,7 +7,10 @@ use can_hal::SamplePoint;
 use crate::channel::KvaserChannel;
 use crate::error::{check_status, KvaserError};
 use crate::event::ReceiveEvent;
-use crate::ffi::{KvBusParamsTq, CAN_ERR_NOT_SUPPORTED, CAN_OPEN_ACCEPT_VIRTUAL, CAN_OPEN_CAN_FD};
+use crate::ffi::{
+    KvBusParamsTq, CAN_ERR_NOT_SUPPORTED, CAN_OPEN_ACCEPT_LARGE_DLC, CAN_OPEN_ACCEPT_VIRTUAL,
+    CAN_OPEN_CAN_FD,
+};
 use crate::library::KvaserLibrary;
 use crate::mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
 
@@ -508,7 +511,8 @@ fn open_classic(
     bitrate_hz: u32,
     params: &BusParams,
 ) -> Result<KvaserChannel<Classic>, KvaserError> {
-    let mut flags = 0;
+    // Send and receive DLCs 9-15 as they are, rather than as 8.
+    let mut flags = CAN_OPEN_ACCEPT_LARGE_DLC;
     if accept_virtual {
         flags |= CAN_OPEN_ACCEPT_VIRTUAL;
     }
