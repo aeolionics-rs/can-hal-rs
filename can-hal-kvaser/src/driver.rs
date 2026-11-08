@@ -26,10 +26,16 @@ pub const KVASER_CLOCK_HZ: u32 = 80_000_000;
 
 /// The clock classic-CAN timing is first solved against when the device's
 /// is unknown: 8 MHz divides the 16, 24, 32 and 80 MHz clocks of Kvaser's
-/// adapters, so a timing that fits it fits any of them. A Leaf Light v2,
-/// for one, times CAN bits from 16 MHz, and its Linux driver doesn't report
-/// its clock.
+/// adapters, so a timing that fits it with a prescaler of at most
+/// [`PORTABLE_MAX_PRESCALER`] fits any of them. A Leaf Light v2, for one,
+/// times CAN bits from 16 MHz, and its Linux driver doesn't report its
+/// clock.
 const PORTABLE_CLOCK_HZ: u32 = 8_000_000;
+
+/// The largest prescaler a [`PORTABLE_CLOCK_HZ`] timing can take. On the
+/// fastest adapter clock, the 80 MHz [`KVASER_CLOCK_HZ`], its prescaler is
+/// ten times larger, and must still be at most [`MAX_PRESCALER`].
+const PORTABLE_MAX_PRESCALER: u32 = MAX_PRESCALER / (KVASER_CLOCK_HZ / PORTABLE_CLOCK_HZ);
 
 /// Default nominal sample point used when
 /// [`KvaserChannelBuilder::sample_point`] is not called.
@@ -99,8 +105,8 @@ impl TimingPhase {
 /// Solve for phase timing at the given controller clock.
 ///
 /// Returns `None` if `bitrate_hz` is zero, does not evenly divide
-/// `clock_hz`, or if no `(prescaler, total_tq)` factoring lands inside the
-/// segment-length constraints.
+/// `clock_hz`, or if no `(prescaler, total_tq)` factoring with a prescaler
+/// of at most `max_prescaler` lands inside the segment-length constraints.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -111,6 +117,7 @@ fn solve_phase_timing(
     sample_point: SamplePoint,
     phase: TimingPhase,
     clock_hz: u32,
+    max_prescaler: u32,
 ) -> Option<(u32, u32, u32)> {
     if bitrate_hz == 0 {
         return None;
@@ -136,7 +143,7 @@ fn solve_phase_timing(
             continue;
         }
         let prescaler = divisor / total_tq;
-        if prescaler == 0 || prescaler > MAX_PRESCALER {
+        if prescaler == 0 || prescaler > max_prescaler {
             total_tq += 1;
             continue;
         }
@@ -191,10 +198,16 @@ fn solve_nominal(
     bitrate_hz: u32,
     sample_point: SamplePoint,
     clock_hz: u32,
+    max_prescaler: u32,
 ) -> Result<BusParams, KvaserError> {
-    let (tseg1, tseg2, sjw) =
-        solve_phase_timing(bitrate_hz, sample_point, TimingPhase::Nominal, clock_hz)
-            .ok_or_else(|| no_timing(TimingPhase::Nominal, bitrate_hz, sample_point))?;
+    let (tseg1, tseg2, sjw) = solve_phase_timing(
+        bitrate_hz,
+        sample_point,
+        TimingPhase::Nominal,
+        clock_hz,
+        max_prescaler,
+    )
+    .ok_or_else(|| no_timing(TimingPhase::Nominal, bitrate_hz, sample_point))?;
     Ok(BusParams {
         tseg1,
         tseg2,
@@ -213,10 +226,15 @@ fn solve_classic(
 ) -> Result<BusParams, KvaserError> {
     clock_hz.map_or_else(
         || {
-            solve_nominal(bitrate_hz, sample_point, PORTABLE_CLOCK_HZ)
-                .or_else(|_| solve_nominal(bitrate_hz, sample_point, KVASER_CLOCK_HZ))
+            solve_nominal(
+                bitrate_hz,
+                sample_point,
+                PORTABLE_CLOCK_HZ,
+                PORTABLE_MAX_PRESCALER,
+            )
+            .or_else(|_| solve_nominal(bitrate_hz, sample_point, KVASER_CLOCK_HZ, MAX_PRESCALER))
         },
-        |clock_hz| solve_nominal(bitrate_hz, sample_point, clock_hz),
+        |clock_hz| solve_nominal(bitrate_hz, sample_point, clock_hz, MAX_PRESCALER),
     )
 }
 
@@ -225,9 +243,14 @@ fn solve_data(
     sample_point: SamplePoint,
     clock_hz: u32,
 ) -> Result<BusParamsFd, KvaserError> {
-    let (tseg1, tseg2, sjw) =
-        solve_phase_timing(bitrate_hz, sample_point, TimingPhase::Data, clock_hz)
-            .ok_or_else(|| no_timing(TimingPhase::Data, bitrate_hz, sample_point))?;
+    let (tseg1, tseg2, sjw) = solve_phase_timing(
+        bitrate_hz,
+        sample_point,
+        TimingPhase::Data,
+        clock_hz,
+        MAX_PRESCALER,
+    )
+    .ok_or_else(|| no_timing(TimingPhase::Data, bitrate_hz, sample_point))?;
     Ok(BusParamsFd { tseg1, tseg2, sjw })
 }
 
@@ -555,7 +578,12 @@ impl KvaserChannelBuilder<Fd> {
     /// Finalize configuration and go on-bus in CAN FD mode.
     pub fn connect(self) -> Result<KvaserChannel<Fd>, KvaserError> {
         let clock_hz = self.clock_or_default();
-        let params = solve_nominal(self.state.nominal_hz(), self.state.sample_point(), clock_hz)?;
+        let params = solve_nominal(
+            self.state.nominal_hz(),
+            self.state.sample_point(),
+            clock_hz,
+            MAX_PRESCALER,
+        )?;
         let fd_params = solve_data(
             self.state.data_hz(),
             self.state.data_sample_point(),
@@ -843,6 +871,7 @@ mod tests {
             SamplePoint::NOMINAL_DEFAULT,
             TimingPhase::Nominal,
             KVASER_CLOCK_HZ,
+            MAX_PRESCALER,
         )
         .unwrap();
         assert_eq!(tseg1, 13);
@@ -857,6 +886,7 @@ mod tests {
             SamplePoint::DATA_DEFAULT,
             TimingPhase::Data,
             KVASER_CLOCK_HZ,
+            MAX_PRESCALER,
         )
         .unwrap();
         assert_eq!(tseg1, 7);
@@ -871,6 +901,7 @@ mod tests {
             SamplePoint::DATA_DEFAULT,
             TimingPhase::Data,
             KVASER_CLOCK_HZ,
+            MAX_PRESCALER,
         )
         .unwrap();
         assert_eq!(tseg1, 12);
@@ -887,6 +918,7 @@ mod tests {
             SamplePoint::PCT_75,
             TimingPhase::Data,
             KVASER_CLOCK_HZ,
+            MAX_PRESCALER,
         )
         .unwrap();
         assert!(tseg2 >= MIN_TSEG2, "tseg2 must be >= 2, got {tseg2}");
@@ -899,14 +931,21 @@ mod tests {
             333_000,
             SamplePoint::NOMINAL_DEFAULT,
             TimingPhase::Nominal,
-            KVASER_CLOCK_HZ
+            KVASER_CLOCK_HZ,
+            MAX_PRESCALER
         )
         .is_none());
     }
 
     #[test]
     fn solve_nominal_returns_busparams() {
-        let p = solve_nominal(500_000, SamplePoint::NOMINAL_DEFAULT, KVASER_CLOCK_HZ).unwrap();
+        let p = solve_nominal(
+            500_000,
+            SamplePoint::NOMINAL_DEFAULT,
+            KVASER_CLOCK_HZ,
+            MAX_PRESCALER,
+        )
+        .unwrap();
         assert_eq!(p.tseg1, 13);
         assert_eq!(p.tseg2, 6);
         assert_eq!(p.sjw, 4);
@@ -1028,6 +1067,24 @@ mod tests {
     }
 
     #[test]
+    fn classic_timing_without_a_clock_fits_every_adapter_at_low_bitrates() {
+        // These divide every adapter clock, but an 8 MHz timing without
+        // PORTABLE_MAX_PRESCALER needs a prescaler above MAX_PRESCALER at
+        // 80 MHz: 2000 at 2 kbit/s (20 TQ), 1250 at 3.2 (20 TQ) and
+        // 6.4 kbit/s (10 TQ).
+        for bitrate_hz in [2_000, 3_200, 6_400] {
+            let p = solve_classic(bitrate_hz, SamplePoint::NOMINAL_DEFAULT, None).unwrap();
+            let tq = total_tq(p.tseg1, p.tseg2).unwrap();
+            for clock_hz in ADAPTER_CLOCKS {
+                assert!(
+                    compute_prescaler(bitrate_hz, tq, clock_hz).is_ok(),
+                    "{bitrate_hz} Hz with {tq} TQ doesn't fit a {clock_hz} Hz clock"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn classic_timing_without_a_clock_at_250k() {
         // 16 TQ, as a Leaf Light v2 takes at 250 kbit/s; 20 doesn't fit its
         // 16 MHz clock.
@@ -1039,7 +1096,13 @@ mod tests {
     #[test]
     fn classic_timing_without_a_clock_falls_back_to_80_mhz() {
         // 625 kbit/s doesn't divide 8 MHz, but does 80 MHz.
-        assert!(solve_nominal(625_000, SamplePoint::NOMINAL_DEFAULT, PORTABLE_CLOCK_HZ).is_err());
+        assert!(solve_nominal(
+            625_000,
+            SamplePoint::NOMINAL_DEFAULT,
+            PORTABLE_CLOCK_HZ,
+            PORTABLE_MAX_PRESCALER
+        )
+        .is_err());
         let p = solve_classic(625_000, SamplePoint::NOMINAL_DEFAULT, None).unwrap();
         let tq = total_tq(p.tseg1, p.tseg2).unwrap();
         assert!(compute_prescaler(625_000, tq, KVASER_CLOCK_HZ).is_ok());
