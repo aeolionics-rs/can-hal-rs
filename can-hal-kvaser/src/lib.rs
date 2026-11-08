@@ -56,7 +56,9 @@ mod ffi;
 mod library;
 
 pub use channel::KvaserChannel;
-pub use driver::{BusParams, BusParamsFd, KvaserChannelBuilder, KvaserDriver, KVASER_CLOCK_HZ};
+#[allow(deprecated)]
+pub use driver::KVASER_CLOCK_HZ;
+pub use driver::{BusParams, BusParamsFd, KvaserChannelBuilder, KvaserDriver, FALLBACK_CLOCK_HZ};
 pub use error::{KvaserError, KvaserStatus};
 pub use mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
 
