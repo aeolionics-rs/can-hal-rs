@@ -381,7 +381,15 @@ impl<Mode> KvaserChannelBuilder<Mode> {
     /// `clock_hz() % (bitrate_hz * (1 + tseg1 + tseg2)) == 0` for each phase.
     #[must_use]
     pub fn clock_hz(&self) -> u32 {
-        self.clock_hz.unwrap_or(FALLBACK_CLOCK_HZ)
+        self.reported_clock_hz().unwrap_or(FALLBACK_CLOCK_HZ)
+    }
+
+    /// The device's clock as CANlib reports it (`canCHANNELDATA_CLOCK_INFO`),
+    /// or `None` when it doesn't, in which case [`clock_hz`](Self::clock_hz)
+    /// assumes [`FALLBACK_CLOCK_HZ`].
+    #[must_use]
+    pub const fn reported_clock_hz(&self) -> Option<u32> {
+        self.clock_hz
     }
 
     fn with_state<Next>(self, state: Next) -> KvaserChannelBuilder<Next> {
