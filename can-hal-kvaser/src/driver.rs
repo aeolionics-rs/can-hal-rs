@@ -28,16 +28,19 @@ pub const FALLBACK_CLOCK_HZ: u32 = 80_000_000;
 )]
 pub const KVASER_CLOCK_HZ: u32 = FALLBACK_CLOCK_HZ;
 
+/// The fastest CAN controller clock of Kvaser's adapters.
+const FASTEST_CLOCK_HZ: u32 = 80_000_000;
+
 /// The clock classic-CAN timing is solved for first when the device's clock
 /// is unknown. 8 MHz divides the 16, 24, 32 and 80 MHz clocks of Kvaser's
 /// adapters. A timing that fits 8 MHz with a prescaler of at most
 /// [`PORTABLE_MAX_PRESCALER`] fits all of them.
 const PORTABLE_CLOCK_HZ: u32 = 8_000_000;
 
-/// The largest prescaler a [`PORTABLE_CLOCK_HZ`] timing can take. On the
-/// fastest adapter clock, the 80 MHz [`FALLBACK_CLOCK_HZ`], its prescaler is
-/// ten times larger, and must still be at most [`MAX_PRESCALER`].
-const PORTABLE_MAX_PRESCALER: u32 = MAX_PRESCALER / (FALLBACK_CLOCK_HZ / PORTABLE_CLOCK_HZ);
+/// The largest prescaler a [`PORTABLE_CLOCK_HZ`] timing can take. On
+/// [`FASTEST_CLOCK_HZ`] its prescaler is `FASTEST_CLOCK_HZ / PORTABLE_CLOCK_HZ`
+/// times larger, and must still be at most [`MAX_PRESCALER`].
+const PORTABLE_MAX_PRESCALER: u32 = MAX_PRESCALER / (FASTEST_CLOCK_HZ / PORTABLE_CLOCK_HZ);
 
 /// Default nominal sample point used when
 /// [`KvaserChannelBuilder::sample_point`] is not called.
@@ -378,7 +381,15 @@ impl<Mode> KvaserChannelBuilder<Mode> {
     /// `clock_hz() % (bitrate_hz * (1 + tseg1 + tseg2)) == 0` for each phase.
     #[must_use]
     pub fn clock_hz(&self) -> u32 {
-        self.clock_hz.unwrap_or(FALLBACK_CLOCK_HZ)
+        self.reported_clock_hz().unwrap_or(FALLBACK_CLOCK_HZ)
+    }
+
+    /// The device's clock as CANlib reports it (`canCHANNELDATA_CLOCK_INFO`),
+    /// or `None` when it doesn't, in which case [`clock_hz`](Self::clock_hz)
+    /// assumes [`FALLBACK_CLOCK_HZ`].
+    #[must_use]
+    pub const fn reported_clock_hz(&self) -> Option<u32> {
+        self.clock_hz
     }
 
     fn with_state<Next>(self, state: Next) -> KvaserChannelBuilder<Next> {
@@ -1061,7 +1072,7 @@ mod tests {
 
     /// The clocks of Kvaser's adapters: Leaf Light v2 (16 MHz), and the
     /// 24, 32 and 80 MHz ones.
-    const ADAPTER_CLOCKS: [u32; 4] = [16_000_000, 24_000_000, 32_000_000, 80_000_000];
+    const ADAPTER_CLOCKS: [u32; 4] = [16_000_000, 24_000_000, 32_000_000, FASTEST_CLOCK_HZ];
 
     #[test]
     fn classic_timing_without_a_clock_fits_every_adapter() {
