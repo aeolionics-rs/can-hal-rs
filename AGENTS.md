@@ -11,6 +11,10 @@ you encounter something unexpected.
 ## Shared Ground Rules
 
 - This is a Rust workspace (resolver v2, edition 2021, MSRV 1.81). Use idiomatic Rust.
+- The MSRV is declared once, as `rust-version` in the root `Cargo.toml`'s
+  `[workspace.package]`; every member inherits it with `rust-version.workspace = true`.
+  CI's `msrv` job checks it. To raise it, change that line and the README's badge.
+  `.cargo/config.toml` makes `cargo update` keep to versions that support it.
 - The core `can-hal` crate has **zero dependencies** and must stay that way. It is
   `no_std`-compatible by default; the `std` feature is opt-in.
 - Backend crates (`can-hal-socketcan`, `can-hal-pcan`, `can-hal-kvaser`) use **dynamic
@@ -296,6 +300,7 @@ The ISO-TP crate implements ISO 15765-2 segmentation and reassembly, generic ove
 | `build-check` | `cargo check` for SocketCAN; clippy for PCAN + Kvaser |
 | `build-check-windows` | Cross-compile clippy for PCAN + Kvaser targeting `x86_64-pc-windows-gnu` |
 | `socketcan-sitl` | Set up a `vcan0` interface and run the SocketCAN SITL tests (`hardware-tests --features vcan --test socketcan_vcan`). No physical hardware; `CAN_HAL_REQUIRE_VCAN=1` makes a missing `vcan0` a hard failure rather than a silent skip |
+| `msrv` | Install the MSRV read from the workspace's `rust-version`, check every crate with it on Linux and for `x86_64-pc-windows-gnu` (the SocketCAN crates on Linux only), check `can-hal-rs` + `can-hal-isotp` without std, and run their unit tests |
 
 ### `hardware-test.yml` (manual dispatch)
 
