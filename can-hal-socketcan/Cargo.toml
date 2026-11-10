@@ -2,7 +2,7 @@
 name = "can-hal-socketcan"
 version.workspace = true
 edition = "2021"
-rust-version = "1.81"
+rust-version.workspace = true
 description = "SocketCAN backend for can-hal-rs traits (Linux)"
 license = "MIT OR Apache-2.0"
 readme = "README.md"

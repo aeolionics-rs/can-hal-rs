@@ -77,3 +77,31 @@ jobs:
       # hardware tests need physical adapters); --test-threads=1 keeps the
       # tests from seeing each other's frames on the shared vcan0.
       - run: cargo test -p hardware-tests --features vcan --test socketcan_vcan -- --test-threads=1
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The other jobs build with rust-toolchain.toml's toolchain, so this one
+      # installs the MSRV and names it explicitly. It reads the MSRV from the
+      # workspace's Cargo.toml, which every member inherits.
+      - name: Read the MSRV
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv"
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+      - run: rustup toolchain install "$MSRV" --profile minimal --target x86_64-pc-windows-gnu
+      - name: Check on Linux
+        run: cargo +"$MSRV" check --workspace --all-targets --all-features
+      - name: Check without std
+        run: cargo +"$MSRV" check -p can-hal-rs -p can-hal-isotp --no-default-features
+      # The SocketCAN crates, and the ISO-TP examples that use them, build on
+      # Linux only.
+      - name: Check on Windows
+        run: >-
+          cargo +"$MSRV" check --target x86_64-pc-windows-gnu --workspace --all-targets
+          --exclude can-hal-socketcan --exclude can-hal-socketcan-examples --exclude can-hal-isotp-examples
+          --features can-hal-rs/async,can-hal-isotp/async,hardware-tests/kvaser-virtual
+      - name: Test
+        run: cargo +"$MSRV" test -p can-hal-rs -p can-hal-isotp --features async
