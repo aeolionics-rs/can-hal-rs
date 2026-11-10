@@ -8,6 +8,7 @@ pub type CanStatus = i32;
 pub const CAN_OK: i32 = 0;
 pub const CAN_ERR_NOMSG: i32 = -2;
 pub const CAN_ERR_NOT_SUPPORTED: i32 = -19;
+pub const CAN_ERR_NOT_IMPLEMENTED: i32 = -32;
 
 // canOpenChannel flags
 pub const CAN_OPEN_CAN_FD: i32 = 0x0400;

@@ -27,6 +27,7 @@ impl fmt::Display for KvaserStatus {
             -17 => "wrong DLL version",
             -18 => "error initializing DLL",
             -19 => "function not supported",
+            -32 => "not implemented",
             _ => "unknown error",
         };
         write!(f, "CANlib error {} ({desc})", self.0)
