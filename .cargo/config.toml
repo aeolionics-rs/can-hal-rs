@@ -1,0 +1,5 @@
+# `cargo update` picks the newest version of each dependency that supports
+# the workspace's rust-version, not one that needs a newer Rust.
+# Read by cargo 1.84 and later.
+[resolver]
+incompatible-rust-versions = "fallback"

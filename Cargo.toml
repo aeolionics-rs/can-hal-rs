@@ -16,6 +16,9 @@ members = [
 # Bump both lines together on release; members inherit via `workspace = true`.
 [workspace.package]
 version = "0.4.3"
+# The MSRV, for every member. CI's msrv job checks it; change the README's
+# badge with it.
+rust-version = "1.81"
 
 [workspace.dependencies]
 can-hal = { version = "0.4.3", path = "can-hal", package = "can-hal-rs" }
