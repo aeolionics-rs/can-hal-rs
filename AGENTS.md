@@ -98,7 +98,7 @@ Code that uses `Filterable` must be aware of this.
 |---|---|---|---|---|
 | SocketCAN | `driver.channel_by_name(name).connect()?` (timing OS-managed) | n/a | n/a (no setters) | n/a |
 | PCAN | `driver.channel(0)?.classic(ClassicBitrate::Br500K).connect()?` (enum, infallible) | `driver.channel(0)?.fd(500_000, 4_000_000)?.connect()?` | `<Fd>` only (none in classic; use `fd(rate, rate)` for custom classic timing) | `<Initial>::fd_explicit(PcanFdTiming)` -> `<FdExplicit>` |
-| Kvaser | `driver.channel(0).classic(500_000)?.connect()?` (`channel()` infallible; all four bitrate-taking transitions - `classic`, `fd`, `classic_explicit`, `fd_explicit` - fail on 80 MHz divisibility; the `_explicit` variants additionally check segment bounds, `(bitrate * (1 + tseg1 + tseg2))` divisibility, and prescaler `[1, 1024]`) | `driver.channel(0).fd(500_000, 4_000_000)?.connect()?` | both `<Classic>` and `<Fd>` | `<Initial>::classic_explicit(hz, BusParams)?` / `fd_explicit(hz, hz, BusParams, BusParamsFd)?` |
+| Kvaser | `driver.channel(0).classic(500_000)?.connect()?` (`channel()` infallible; all four bitrate-taking transitions - `classic`, `fd`, `classic_explicit`, `fd_explicit` - fail on divisibility of the device's clock, as CANlib reports it, or 80 MHz when it doesn't; the `_explicit` variants additionally check segment bounds, `(bitrate * (1 + tseg1 + tseg2))` divisibility, and prescaler `[1, 1024]`) | `driver.channel(0).fd(500_000, 4_000_000)?.connect()?` | both `<Classic>` and `<Fd>` | `<Initial>::classic_explicit(hz, BusParams)?` / `fd_explicit(hz, hz, BusParams, BusParamsFd)?` |
 
 ## Build and Development
 
@@ -235,7 +235,11 @@ Timing parameters must match across all adapters on the same bus, or nodes will 
   `.fd_explicit(PcanFdTiming)`. Classic CAN uses the predefined
   `ClassicBitrate` enum and has no sample-point control (PCAN-Basic API
   limitation).
-- **Kvaser**: 80 MHz clock. Same solver shape as PCAN. Classic and FD
+- **Kvaser**: the device's clock, from CANlib's `canCHANNELDATA_CLOCK_INFO`,
+  or 80 MHz when it isn't reported (Linux CANlib doesn't for a Leaf Light v2,
+  whose CAN clock is 16 MHz, or for virtual channels). Classic timing with an
+  unknown clock is solved for 8 MHz first, which fits 16, 24, 32 and 80 MHz
+  clocks (16 TQ at 250 and 500 kbit/s). Same solver shape as PCAN. Classic and FD
   builders both honor `.sample_point()` / `.data_sample_point()`. For raw
   control, use `.classic_explicit(hz, BusParams)?` or
   `.fd_explicit(hz, hz, BusParams, BusParamsFd)?` on `<Initial>`. The
