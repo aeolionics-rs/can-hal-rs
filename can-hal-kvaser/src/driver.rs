@@ -8,8 +8,9 @@ use crate::channel::KvaserChannel;
 use crate::error::{check_status, KvaserError};
 use crate::event::ReceiveEvent;
 use crate::ffi::{
-    KvBusParamsTq, KvClockInfo, CAN_CHANNELDATA_CLOCK_INFO, CAN_ERR_NOT_SUPPORTED, CAN_OK,
-    CAN_OPEN_ACCEPT_LARGE_DLC, CAN_OPEN_ACCEPT_VIRTUAL, CAN_OPEN_CAN_FD,
+    KvBusParamsTq, KvClockInfo, CAN_CHANNELDATA_CLOCK_INFO, CAN_ERR_NOT_IMPLEMENTED,
+    CAN_ERR_NOT_SUPPORTED, CAN_OK, CAN_OPEN_ACCEPT_LARGE_DLC, CAN_OPEN_ACCEPT_VIRTUAL,
+    CAN_OPEN_CAN_FD,
 };
 use crate::library::KvaserLibrary;
 use crate::mode::{Classic, ClassicExplicit, Fd, FdExplicit, Initial};
@@ -723,9 +724,13 @@ fn open_fd(
             let data_tq = to_data_tq(data_hz, fd_params, clock_hz)?;
             // SAFETY: canSetBusParamsFdTq was loaded from canlib; handle is valid
             let status = unsafe { (set_fd_tq)(handle, nominal_tq, data_tq) };
-            if status == CAN_ERR_NOT_SUPPORTED {
-                // Some linuxcan builds export the symbol but reject it for
-                // certain hardware/firmware. Fall through to the legacy path.
+            if status == CAN_ERR_NOT_SUPPORTED || status == CAN_ERR_NOT_IMPLEMENTED {
+                // CANlib can export canSetBusParamsFdTq and still refuse it
+                // for a channel. On Linux it returns canERR_NOT_IMPLEMENTED
+                // for a channel without time-quanta support, such as a
+                // virtual channel, and some builds return
+                // canERR_NOT_SUPPORTED for certain hardware or firmware.
+                // Either way, fall through to the legacy calls.
                 true
             } else {
                 check_status(status)?;
