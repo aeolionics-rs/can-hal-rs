@@ -29,10 +29,10 @@
 
 use std::time::Duration;
 
-use can_hal::channel::{Receive, Transmit};
-use can_hal::frame::CanFrame;
+use can_hal::channel::{Receive, ReceiveFd, Transmit, TransmitFd};
+use can_hal::frame::{CanFdFrame, CanFrame, Frame};
 use can_hal::CanId;
-use can_hal_kvaser::{Classic, KvaserChannel, KvaserChannelBuilder, KvaserDriver};
+use can_hal_kvaser::{Classic, Fd, KvaserChannel, KvaserChannelBuilder, KvaserDriver};
 
 /// Environment variable naming the two virtual channels, as `"<tx>,<rx>"`.
 const CHANNELS_ENV: &str = "CAN_HAL_KVASER_VIRTUAL_CHANNELS";
@@ -42,6 +42,7 @@ const CHANNELS_ENV: &str = "CAN_HAL_KVASER_VIRTUAL_CHANNELS";
 const REQUIRE_ENV: &str = "CAN_HAL_REQUIRE_KVASER_VIRTUAL";
 
 const NOMINAL_HZ: u32 = 500_000;
+const DATA_HZ: u32 = 2_000_000;
 const TIMEOUT: Duration = Duration::from_secs(1);
 
 fn required() -> bool {
@@ -98,6 +99,31 @@ fn receive(rx: &mut KvaserChannel<Classic>) -> CanFrame {
         .into_frame()
 }
 
+fn open_fd(driver: &KvaserDriver, index: u32) -> Option<KvaserChannel<Fd>> {
+    let channel = driver
+        .channel(index)
+        .accept_virtual(true)
+        .fd(NOMINAL_HZ, DATA_HZ)
+        .and_then(KvaserChannelBuilder::<Fd>::connect);
+    match channel {
+        Ok(channel) => Some(channel),
+        Err(e) => skip(&format!("FD channel {index} could not be opened"), &e),
+    }
+}
+
+fn fd_pair() -> Option<(KvaserChannel<Fd>, KvaserChannel<Fd>)> {
+    let driver = driver()?;
+    let (tx, rx) = channels();
+    Some((open_fd(&driver, tx)?, open_fd(&driver, rx)?))
+}
+
+fn receive_fd(rx: &mut KvaserChannel<Fd>) -> Frame {
+    rx.receive_fd_timeout(TIMEOUT)
+        .expect("receive error")
+        .expect("receive timeout")
+        .into_frame()
+}
+
 #[test]
 fn test_kvaser_virtual_classic_every_dlc() {
     let Some((mut tx, mut rx)) = classic_pair() else {
@@ -122,5 +148,28 @@ fn test_kvaser_virtual_remote_every_dlc() {
         let frame = CanFrame::new_remote(id, dlc).unwrap();
         tx.transmit(&frame).expect("transmit");
         assert_eq!(receive(&mut rx), frame, "remote DLC {dlc}");
+    }
+}
+
+/// Opening for FD sets the timing with `canSetBusParamsFdTq`, which Linux
+/// CANlib refuses on virtual channels with `canERR_NOT_IMPLEMENTED`; the
+/// builder then falls back to `canSetBusParams` and `canSetBusParamsFd`.
+#[test]
+fn test_kvaser_virtual_fd_every_length() {
+    let Some((mut tx, mut rx)) = fd_pair() else {
+        return;
+    };
+    let id = CanId::new_extended(0x1234_5678).unwrap();
+    let data: Vec<u8> = (0..64).collect();
+    for len in [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64] {
+        for brs in [false, true] {
+            let frame = CanFdFrame::new(id, &data[..len], brs, false).unwrap();
+            tx.transmit_fd(&frame).expect("transmit");
+            assert_eq!(
+                receive_fd(&mut rx),
+                Frame::Fd(frame),
+                "length {len}, BRS {brs}"
+            );
+        }
     }
 }
